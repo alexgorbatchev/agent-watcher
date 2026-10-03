@@ -459,17 +459,46 @@ func TestCursorStorePruneByAge(t *testing.T) {
 		t.Fatalf("writing fileNew: %v", err)
 	}
 
+	fiOld, err := os.Stat(fileOld)
+	if err != nil {
+		t.Fatalf("stat fileOld: %v", err)
+	}
+	devOld, inoOld, _ := getFileInfoStat(fiOld)
+
+	fiNew, err := os.Stat(fileNew)
+	if err != nil {
+		t.Fatalf("stat fileNew: %v", err)
+	}
+	devNew, inoNew, _ := getFileInfoStat(fiNew)
+
+	// key-old: existing file, matching inode, older than retention window (48h ago).
+	// Must NOT be pruned by age alone.
 	store.Set(&Cursor{
-		Key:       "key-old",
+		Key:       fmt.Sprintf("%d:%d", devOld, inoOld),
 		Path:      fileOld,
 		Offset:    10,
+		Inode:     inoOld,
+		Device:    devOld,
 		UpdatedAt: time.Now().Add(-48 * time.Hour).UnixMilli(),
 	})
+	// key-new: existing file, matching inode, recent.
 	store.Set(&Cursor{
-		Key:       "key-new",
+		Key:       fmt.Sprintf("%d:%d", devNew, inoNew),
 		Path:      fileNew,
 		Offset:    20,
+		Inode:     inoNew,
+		Device:    devNew,
 		UpdatedAt: time.Now().UnixMilli(),
+	})
+	// key-mismatched-inode: points to fileOld path, but has an old/replaced inode that no longer matches on disk.
+	// Must be pruned because its file no longer exists at this path.
+	store.Set(&Cursor{
+		Key:       "dev:99999999",
+		Path:      fileOld,
+		Offset:    5,
+		Inode:     99999999,
+		Device:    devOld,
+		UpdatedAt: time.Now().Add(-48 * time.Hour).UnixMilli(),
 	})
 
 	pruned := store.Prune(24 * time.Hour)
@@ -477,11 +506,14 @@ func TestCursorStorePruneByAge(t *testing.T) {
 		t.Errorf("Prune() = %d, want 1", pruned)
 	}
 
-	if _, ok := store.Get("key-old"); ok {
-		t.Errorf("expected key-old to be pruned by age")
+	if _, ok := store.Get(fmt.Sprintf("%d:%d", devOld, inoOld)); !ok {
+		t.Errorf("expected key-old (existing file with matching inode) to be kept")
 	}
-	if _, ok := store.Get("key-new"); !ok {
+	if _, ok := store.Get(fmt.Sprintf("%d:%d", devNew, inoNew)); !ok {
 		t.Errorf("expected key-new to be kept")
+	}
+	if _, ok := store.Get("dev:99999999"); ok {
+		t.Errorf("expected key-mismatched-inode to be pruned")
 	}
 }
 
@@ -692,8 +724,8 @@ func TestCursorStorePruneConcurrentUpdateSafety(t *testing.T) {
 		return false
 	})
 
-	if fileExistsCalled != 1 {
-		t.Errorf("fileExists was called %d times, want 1", fileExistsCalled)
+	if fileExistsCalled != 2 {
+		t.Errorf("fileExists was called %d times, want 2", fileExistsCalled)
 	}
 	if pruned != 0 {
 		t.Errorf("PruneWithFileExists() = %d, want 0 because both cursors were concurrently updated", pruned)
@@ -1179,5 +1211,353 @@ func TestCursorStoreStartAutoFlush_NonPositiveIntervalDefaults(t *testing.T) {
 				t.Errorf("expected 0 saves initially, got %d", store.SaveCount())
 			}
 		})
+	}
+}
+
+func TestCursorStorePruneWithFileExistsOldCursorSurvives(t *testing.T) {
+	tmpDir := t.TempDir()
+	cursorPath := filepath.Join(tmpDir, "observer-cursors.json")
+	store, err := NewCursorStore(cursorPath)
+	if err != nil {
+		t.Fatalf("NewCursorStore error: %v", err)
+	}
+
+	testPath := filepath.Join(tmpDir, "transcript.jsonl")
+	if err := os.WriteFile(testPath, []byte("some initial content\n"), 0600); err != nil {
+		t.Fatalf("writing testPath: %v", err)
+	}
+
+	fi, err := os.Stat(testPath)
+	if err != nil {
+		t.Fatalf("stat testPath: %v", err)
+	}
+	dev, ino, err := getFileInfoStat(fi)
+	if err != nil {
+		t.Fatalf("getFileInfoStat error: %v", err)
+	}
+	key := fmt.Sprintf("%d:%d", dev, ino)
+
+	oldTime := time.Now().Add(-48 * time.Hour).UnixMilli()
+	store.Set(&Cursor{
+		Key:       key,
+		Path:      testPath,
+		Offset:    int64(len("some initial content\n")),
+		Size:      fi.Size(),
+		Inode:     ino,
+		Device:    dev,
+		UpdatedAt: oldTime,
+	})
+
+	// File exists: custom fileExists predicate returns true
+	pruned := store.PruneWithFileExists(24*time.Hour, func(path string) bool {
+		return path == testPath
+	})
+
+	if pruned != 0 {
+		t.Errorf("PruneWithFileExists() = %d, want 0 (old cursor for existing file must survive)", pruned)
+	}
+
+	c, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("cursor was pruned from store, expected to survive")
+	}
+	if c.Offset != int64(len("some initial content\n")) {
+		t.Errorf("cursor offset = %d, want %d", c.Offset, len("some initial content\n"))
+	}
+}
+
+func TestTailerRestartAfterPruneSweepResumesFromCommittedOffset(t *testing.T) {
+	tmpDir := t.TempDir()
+	cursorPath := filepath.Join(tmpDir, "observer-cursors.json")
+	store, err := NewCursorStore(cursorPath)
+	if err != nil {
+		t.Fatalf("NewCursorStore error: %v", err)
+	}
+
+	filePath := filepath.Join(tmpDir, "session.jsonl")
+	content := []byte("line1\nline2\nline3\n")
+	if err := os.WriteFile(filePath, content, 0600); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+
+	var mu sync.Mutex
+	var received []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tail, err := NewTailer(filePath, store, func(line []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		received = append(received, string(line))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NewTailer error: %v", err)
+	}
+
+	go func() {
+		_ = tail.Start(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(received)
+		mu.Unlock()
+		if count >= 3 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	tail.Stop()
+
+	mu.Lock()
+	initialCount := len(received)
+	mu.Unlock()
+	if initialCount != 3 {
+		t.Fatalf("initial read lines = %d, want 3", initialCount)
+	}
+
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat filePath: %v", err)
+	}
+	dev, ino, err := getFileInfoStat(fi)
+	if err != nil {
+		t.Fatalf("getFileInfoStat error: %v", err)
+	}
+	key := fmt.Sprintf("%d:%d", dev, ino)
+
+	c, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("cursor not found in store for %q", key)
+	}
+	if c.Offset != fi.Size() {
+		t.Fatalf("cursor offset = %d, want %d", c.Offset, fi.Size())
+	}
+
+	// Age the cursor past the retention window (e.g. 48 hours ago with 24h retention)
+	agedCursor := *c
+	agedCursor.UpdatedAt = time.Now().Add(-48 * time.Hour).UnixMilli()
+	store.Set(&agedCursor)
+
+	// Run prune sweep
+	pruned := store.Prune(24 * time.Hour)
+	if pruned != 0 {
+		t.Fatalf("Prune() = %d, want 0 (cursor for existing file must not be pruned)", pruned)
+	}
+
+	if _, ok := store.Get(key); !ok {
+		t.Fatalf("expected cursor to survive prune sweep, but was removed")
+	}
+
+	// Restart tailer on the same file with the same store
+	var receivedAfterRestart []string
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	tail2, err := NewTailer(filePath, store, func(line []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		receivedAfterRestart = append(receivedAfterRestart, string(line))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NewTailer restart error: %v", err)
+	}
+
+	go func() {
+		_ = tail2.Start(ctx2)
+	}()
+
+	// Wait briefly to confirm no duplicate lines are read
+	time.Sleep(100 * time.Millisecond)
+	tail2.Stop()
+
+	mu.Lock()
+	replayedCount := len(receivedAfterRestart)
+	mu.Unlock()
+
+	if replayedCount != 0 {
+		t.Errorf("tailer restart replayed %d lines (%v), want 0 (must resume from committed offset %d)",
+			replayedCount, receivedAfterRestart, fi.Size())
+	}
+}
+
+func TestCursorStorePruneZeroDeviceOrNonUnixSurvives(t *testing.T) {
+	tmpDir := t.TempDir()
+	cursorPath := filepath.Join(tmpDir, "observer-cursors.json")
+	store, err := NewCursorStore(cursorPath)
+	if err != nil {
+		t.Fatalf("NewCursorStore error: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "active.jsonl")
+	if err := os.WriteFile(testFile, []byte("active content\n"), 0600); err != nil {
+		t.Fatalf("writing testFile: %v", err)
+	}
+
+	fi, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("stat testFile: %v", err)
+	}
+	dev, ino, err := getFileInfoStat(fi)
+	if err != nil {
+		t.Fatalf("getFileInfoStat error: %v", err)
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour).UnixMilli()
+
+	// 1. Cursor with Device = 0, matching Inode.
+	// Must survive because inode matches and zero device does not trigger false mismatch.
+	keyZeroDev := fmt.Sprintf("0:%d", ino)
+	store.Set(&Cursor{
+		Key:       keyZeroDev,
+		Path:      testFile,
+		Offset:    10,
+		Inode:     ino,
+		Device:    0,
+		UpdatedAt: oldTime,
+	})
+
+	// 2. Cursor with Device = 0, Inode = 0 (simulates non-Unix zero return or legacy cursor format).
+	// Must survive because file exists on disk and zero metadata does not trigger false mismatch.
+	keyZeroBoth := "zero-metadata-key"
+	store.Set(&Cursor{
+		Key:       keyZeroBoth,
+		Path:      testFile,
+		Offset:    10,
+		Inode:     0,
+		Device:    0,
+		UpdatedAt: oldTime,
+	})
+
+	// 3. Cursor with Device = 0 in struct, but key is "dev:ino" so dev is extracted from key.
+	// Must survive because key provides dev fallback and inode matches.
+	keyFallback := fmt.Sprintf("%d:%d", dev, ino)
+	store.Set(&Cursor{
+		Key:       keyFallback,
+		Path:      testFile,
+		Offset:    10,
+		Inode:     ino,
+		Device:    0, // zero in struct, extracted from key
+		UpdatedAt: oldTime,
+	})
+
+	// 4. Cursor with Device = 0, but mismatched Inode (e.g. 99999999).
+	// Must be pruned because inode does not match the file on disk.
+	keyMismatchedIno := "0:99999999"
+	store.Set(&Cursor{
+		Key:       keyMismatchedIno,
+		Path:      testFile,
+		Offset:    10,
+		Inode:     99999999,
+		Device:    0,
+		UpdatedAt: oldTime,
+	})
+
+	pruned := store.Prune(24 * time.Hour)
+	if pruned != 1 {
+		t.Errorf("Prune() = %d, want 1 (only mismatched inode should be pruned)", pruned)
+	}
+
+	if _, ok := store.Get(keyZeroDev); !ok {
+		t.Errorf("expected cursor with Device=0 and matching Inode to survive prune")
+	}
+	if _, ok := store.Get(keyZeroBoth); !ok {
+		t.Errorf("expected cursor with Device=0, Inode=0 to survive prune when file exists")
+	}
+	if _, ok := store.Get(keyFallback); !ok {
+		t.Errorf("expected cursor with key-fallback device to survive prune")
+	}
+	if _, ok := store.Get(keyMismatchedIno); ok {
+		t.Errorf("expected cursor with mismatched inode to be pruned")
+	}
+}
+
+func TestCursorStorePruneWithFileExistsNilPredicate(t *testing.T) {
+	tmpDir := t.TempDir()
+	cursorPath := filepath.Join(tmpDir, "observer-cursors.json")
+	store, err := NewCursorStore(cursorPath)
+	if err != nil {
+		t.Fatalf("NewCursorStore error: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "exists.jsonl")
+	if err := os.WriteFile(testFile, []byte("data\n"), 0600); err != nil {
+		t.Fatalf("writing testFile: %v", err)
+	}
+
+	fi, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("stat testFile: %v", err)
+	}
+	dev, ino, err := getFileInfoStat(fi)
+	if err != nil {
+		t.Fatalf("getFileInfoStat error: %v", err)
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour).UnixMilli()
+
+	// Existing file cursor older than retention window: should survive
+	keyExisting := fmt.Sprintf("%d:%d", dev, ino)
+	store.Set(&Cursor{
+		Key:       keyExisting,
+		Path:      testFile,
+		Offset:    5,
+		Inode:     ino,
+		Device:    dev,
+		UpdatedAt: oldTime,
+	})
+
+	// Cursor with Device=0 and matching Inode: should survive
+	keyZeroDev := "zero-dev-nil-test"
+	store.Set(&Cursor{
+		Key:       keyZeroDev,
+		Path:      testFile,
+		Offset:    5,
+		Inode:     ino,
+		Device:    0,
+		UpdatedAt: oldTime,
+	})
+
+	// Non-existent file cursor: should be pruned
+	missingFile := filepath.Join(tmpDir, "missing.jsonl")
+	keyMissing := "key-missing-nil-test"
+	store.Set(&Cursor{
+		Key:       keyMissing,
+		Path:      missingFile,
+		Offset:    10,
+		UpdatedAt: oldTime,
+	})
+
+	// Mismatched inode cursor: should be pruned
+	keyMismatched := "key-mismatched-nil-test"
+	store.Set(&Cursor{
+		Key:       keyMismatched,
+		Path:      testFile,
+		Offset:    5,
+		Inode:     ino + 99999,
+		Device:    dev,
+		UpdatedAt: oldTime,
+	})
+
+	// PruneWithFileExists with nil predicate must default to defaultFileExists
+	pruned := store.PruneWithFileExists(24*time.Hour, nil)
+	if pruned != 2 {
+		t.Errorf("PruneWithFileExists(24h, nil) = %d, want 2", pruned)
+	}
+
+	if _, ok := store.Get(keyExisting); !ok {
+		t.Errorf("expected existing file cursor to survive when fileExists is nil")
+	}
+	if _, ok := store.Get(keyZeroDev); !ok {
+		t.Errorf("expected cursor with Device=0 to survive when fileExists is nil")
+	}
+	if _, ok := store.Get(keyMissing); ok {
+		t.Errorf("expected missing file cursor to be pruned when fileExists is nil")
+	}
+	if _, ok := store.Get(keyMismatched); ok {
+		t.Errorf("expected mismatched inode cursor to be pruned when fileExists is nil")
 	}
 }

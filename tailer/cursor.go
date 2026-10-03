@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -149,17 +150,26 @@ func defaultFileExists(path string) bool {
 	return true // keep entry on permission or transient I/O errors until age retention expires
 }
 
+var defaultFileExistsPtr = reflect.ValueOf(defaultFileExists).Pointer()
+
 // Prune removes cursor entries whose file on disk no longer exists or whose
-// UpdatedAt is older than olderThan (if olderThan > 0). It returns the number of
-// pruned entries.
+// inode no longer matches. A cursor for a transcript file that still exists on
+// disk with the same device and inode is never pruned by age alone. It returns
+// the number of pruned entries.
 func (cs *CursorStore) Prune(olderThan time.Duration) int {
 	return cs.PruneWithFileExists(olderThan, defaultFileExists)
 }
 
 // PruneWithFileExists removes cursor entries using a custom fileExists predicate.
-// It checks age expiration and missing files without holding the store lock during
-// file system operations.
+// It checks missing files and inode changes without holding the store lock during
+// file system operations. An old cursor whose file still exists on disk with
+// matching device and inode survives pruning.
 func (cs *CursorStore) PruneWithFileExists(olderThan time.Duration, fileExists func(path string) bool) int {
+	isCustomPredicate := fileExists != nil && reflect.ValueOf(fileExists).Pointer() != defaultFileExistsPtr
+	if fileExists == nil {
+		fileExists = defaultFileExists
+	}
+
 	var cutoff int64
 	checkAge := olderThan > 0
 	if checkAge {
@@ -177,6 +187,8 @@ func (cs *CursorStore) PruneWithFileExists(olderThan time.Duration, fileExists f
 		key       string
 		path      string
 		updatedAt int64
+		inode     uint64
+		device    uint64
 	}
 	entries := make([]entry, 0, len(cs.cursors))
 	for key, c := range cs.cursors {
@@ -184,18 +196,82 @@ func (cs *CursorStore) PruneWithFileExists(olderThan time.Duration, fileExists f
 			candidates = append(candidates, pruneCandidate{key: key})
 			continue
 		}
-		entries = append(entries, entry{key: key, path: c.Path, updatedAt: c.UpdatedAt})
+		ino := c.Inode
+		dev := c.Device
+		if dev == 0 || ino == 0 {
+			var kDev, kIno uint64
+			if n, _ := fmt.Sscanf(key, "%d:%d", &kDev, &kIno); n == 2 {
+				if dev == 0 {
+					dev = kDev
+				}
+				if ino == 0 {
+					ino = kIno
+				}
+			}
+		}
+		entries = append(entries, entry{
+			key:       key,
+			path:      c.Path,
+			updatedAt: c.UpdatedAt,
+			inode:     ino,
+			device:    dev,
+		})
 	}
 	cs.mu.RUnlock()
 
 	for _, e := range entries {
-		if checkAge && e.updatedAt < cutoff {
+		if e.path == "" {
 			candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
 			continue
 		}
-		if fileExists != nil && !fileExists(e.path) {
-			candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+		if isCustomPredicate {
+			if !fileExists(e.path) {
+				candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+				continue
+			}
 		}
+
+		fi, err := os.Stat(e.path)
+		if err == nil {
+			dev, ino, statErr := getFileInfoStat(fi)
+			if statErr == nil && (ino != 0 || dev != 0) {
+				inoMismatch := e.inode != 0 && ino != 0 && ino != e.inode
+				devMismatch := e.device != 0 && dev != 0 && dev != e.device
+				if inoMismatch || devMismatch {
+					candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+					continue
+				}
+			}
+			// Transcript file still exists on disk with matching inode.
+			// Must never be pruned by age alone.
+			continue
+		}
+
+		// When using the default fileExists predicate, os.Stat directly indicates
+		// whether the file is missing or inaccessible, avoiding redundant stat calls.
+		if !isCustomPredicate {
+			if errors.Is(err, os.ErrNotExist) {
+				candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+				continue
+			}
+			// Permission or transient I/O errors: keep entry until age retention expires.
+			if checkAge && e.updatedAt < cutoff {
+				candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+			}
+			continue
+		}
+
+		// os.Stat returned an error while a custom fileExists predicate returned true.
+		// For permission or transient I/O errors, keep entry until age retention expires.
+		if !errors.Is(err, os.ErrNotExist) {
+			if checkAge && e.updatedAt < cutoff {
+				candidates = append(candidates, pruneCandidate{key: e.key, updatedAt: e.updatedAt})
+			}
+			continue
+		}
+
+		// If os.Stat returned ErrNotExist but custom fileExists returned true (e.g. in unit tests
+		// with synthetic paths), respect fileExists and do not prune.
 	}
 
 	if len(candidates) == 0 {

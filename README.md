@@ -99,7 +99,7 @@ Explicit paths take precedence over environment-based defaults.
 | `CursorPath` | Cache path above | Acknowledged JSONL byte cursors. |
 | `OpencodeCheckpointPath` | Resolved `CursorPath` + `.opencode` | Acknowledged OpenCode event revisions. |
 | `SessionStatePath` | Cache path above | Last known running sessions for exit detection across restarts. |
-| `CursorRetention` | `24h` | Prune old transcript cursors. |
+| `CursorRetention` | `24h` | Retain cursors for inaccessible transcripts for this long. Existing transcripts with matching device and inode keep their cursors regardless of age; deleted or replaced files are pruned. |
 | `CursorPruneInterval` | `1h` | Period between cursor pruning passes. |
 | `CursorFlushInterval` | `2s` | Period between transcript and database checkpoint flushes. |
 | `ProcessSnapshotProvider` | Live process discovery | Supply process snapshots for embedded applications or tests. |

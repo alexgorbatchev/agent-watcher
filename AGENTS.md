@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-02 15:48
-last_modified: 2026-10-02 17:25
+last_modified: 2026-10-02 21:21
 status: current
 ---
 
@@ -23,6 +23,7 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 - `watcher.Run` owns workers and joins them on cancellation. Handlers may run concurrently and must respect their context.
 - `scanner/` discovers sessions with one shared process snapshot per tick; `tailer/` owns filesystem watches and byte cursors. Keep event parsing in `agent-parser`.
 - Transcript acknowledgement represents every event in one source line. Commit only a contiguous acknowledged prefix and bind callbacks to the file generation to reject acknowledgements from replaced files.
+- Cursor pruning preserves existing transcripts with matching device and inode regardless of age; remove checkpoints for deleted or replaced files. Age retention applies to inaccessible files.
 - OpenCode message watching is part of this library: use `agent-parser`'s read-only database API, emit changed message/part events, and checkpoint database revisions separately from transcript byte offsets. Drain final messages before emitting exit.
 - OpenCode child sessions share their parent's process. Completed assistant usage is checkpointed once per message, including across restart.
 - Logger injection uses `*slog.Logger`; messages are concise snake_case actions. Consumers choose output formatting.
