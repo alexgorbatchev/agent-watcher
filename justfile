@@ -33,3 +33,7 @@ check: lint test
 # Clean temporary and test artifacts
 clean:
     rm -rf bin dist coverage.out .tmp
+
+# Download project dependencies for local development
+setup:
+    go mod download
