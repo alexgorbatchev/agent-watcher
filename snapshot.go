@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+
+	"github.com/alexgorbatchev/agent-watcher/scanner"
 )
 
 // Session describes a live agent session at one moment. Times are Unix milliseconds.
@@ -21,6 +23,12 @@ type Session struct {
 	LastActivity   int64   `json:"lastActivity"`
 	Subagent       bool    `json:"subagent"`
 	TranscriptPath string  `json:"transcriptPath,omitempty"`
+	// State is SessionStateUnknown when the harness records nothing comparable.
+	State          scanner.SessionState `json:"state"`
+	StateUpdatedAt int64                `json:"stateUpdatedAt,omitempty"`
+	// Entrypoint is how Claude Code was started. Headless sessions report
+	// "sdk-cli", and their kind says interactive, so use this to identify them.
+	Entrypoint string `json:"entrypoint,omitempty"`
 }
 
 // Snapshotter lists live sessions on demand. Reusing one keeps the scanners' file
@@ -87,5 +95,6 @@ func (s session) snapshot() Session {
 	return Session{Harness: s.Harness, HarnessVersion: s.HarnessVersion, SessionID: s.SessionID,
 		PID: s.PID, CWD: s.CWD, Name: s.name, StartedAt: s.startedAt,
 		LastActivity: cmp.Or(s.lastActive, s.Timestamp), Subagent: s.SubagentID != nil,
-		TranscriptPath: s.path}
+		TranscriptPath: s.path, State: cmp.Or(s.state, scanner.SessionStateUnknown),
+		StateUpdatedAt: s.stateUpdatedAt, Entrypoint: s.entrypoint}
 }

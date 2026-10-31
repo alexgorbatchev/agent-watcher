@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/alexgorbatchev/agent-watcher/scanner"
 )
 
 func TestSnapshotListsLiveSessionsWithoutState(t *testing.T) {
@@ -160,4 +162,51 @@ func TestSnapshotterIsSafeForConcurrentUse(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestSnapshotReportsClaudeCodeState(t *testing.T) {
+	tests := []struct {
+		status string
+		want   scanner.SessionState
+	}{
+		{"busy", scanner.SessionStateWorking},
+		{"waiting", scanner.SessionStateWaiting},
+		{"idle", scanner.SessionStateIdle},
+		{"shell", scanner.SessionStateUnknown},
+		{"future-status", scanner.SessionStateUnknown},
+		{"", scanner.SessionStateUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Harnesses = []Harness{HarnessClaudeCode}
+			descriptor := fmt.Sprintf(`{"pid":%d,"sessionId":"s","cwd":"/work","status":%q,"statusUpdatedAt":1793417355639,"entrypoint":"sdk-cli","kind":"interactive"}`, os.Getpid(), tt.status)
+			writeTestFile(t, filepath.Join(cfg.ClaudeSessionsDirs[0], "s.json"), descriptor)
+
+			sessions, err := Snapshot(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sessions) != 1 {
+				t.Fatalf("sessions = %+v", sessions)
+			}
+			got := sessions[0]
+			if got.State != tt.want || got.StateUpdatedAt != 1793417355639 || got.Entrypoint != "sdk-cli" {
+				t.Fatalf("session = %+v, want state %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotReportsUnknownStateWithoutARecordedOne(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Harnesses = []Harness{HarnessPi}
+	transcriptFixture(t, cfg, HarnessPi)
+	sessions, err := Snapshot(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].State != scanner.SessionStateUnknown {
+		t.Fatalf("sessions = %+v", sessions)
+	}
 }

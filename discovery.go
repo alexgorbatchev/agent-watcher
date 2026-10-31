@@ -79,7 +79,8 @@ func (d *discovery) discover(ctx context.Context, harness Harness) ([]session, e
 		for _, desc := range found {
 			s := session{Event: Event{Harness: harness, HarnessVersion: desc.HarnessVersion,
 				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD}},
-				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: true, name: desc.Name}
+				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: true, name: desc.Name,
+				state: scanner.ClaudeSessionState(desc.Status), stateUpdatedAt: desc.StatusUpdatedAt, entrypoint: desc.Entrypoint}
 			if desc.NameSource == "custom" && desc.Name != "" {
 				s.Data.Title = &desc.Name
 			}

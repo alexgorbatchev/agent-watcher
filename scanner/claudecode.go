@@ -10,15 +10,17 @@ import (
 )
 
 type SessionDescriptor struct {
-	PID            int    `json:"pid"`
-	SessionID      string `json:"sessionId"`
-	CWD            string `json:"cwd"`
-	Status         string `json:"status"`
-	TranscriptPath string `json:"transcriptPath"`
-	StartedAt      int64  `json:"startedAt"`
-	HarnessVersion string `json:"version"`
-	Name           string `json:"name,omitempty"`
-	NameSource     string `json:"nameSource,omitempty"`
+	PID             int    `json:"pid"`
+	SessionID       string `json:"sessionId"`
+	CWD             string `json:"cwd"`
+	Status          string `json:"status"`
+	StatusUpdatedAt int64  `json:"statusUpdatedAt"`
+	Entrypoint      string `json:"entrypoint"`
+	TranscriptPath  string `json:"transcriptPath"`
+	StartedAt       int64  `json:"startedAt"`
+	HarnessVersion  string `json:"version"`
+	Name            string `json:"name,omitempty"`
+	NameSource      string `json:"nameSource,omitempty"`
 }
 
 type SubagentTranscript struct {

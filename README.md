@@ -80,11 +80,22 @@ This handler acknowledges after writing to stdout. A durable consumer acknowledg
 | `Run(ctx, config, handler) error` | Own discovery, watching, worker shutdown, and checkpoint persistence. Normal cancellation returns nil; an already cancelled context returns its error without I/O. |
 | `Snapshot(ctx, config) ([]Session, error)` | List the sessions running now, one shot. Reads no transcript history and needs no cursors, tailers, session tracker, or handler. A harness that fails does not hide the others: the sessions found are returned with the joined error. |
 | `NewSnapshotter(config)`, `Snapshotter.Snapshot(ctx)` | The same list for callers that ask repeatedly; a reused `Snapshotter` keeps file caches. |
-| `Session` | Harness, version, session ID, PID, working directory, name, start time, last activity, subagent flag, and transcript path. Times are Unix milliseconds. Claude Code subagents are not listed: their transcripts remain after they finish. |
+| `Session` | Harness, version, session ID, PID, working directory, name, start time, last activity, subagent flag, transcript path, state, and Claude Code entrypoint. Times are Unix milliseconds. Claude Code subagents are not listed: their transcripts remain after they finish. |
 | `Config` | Choose harnesses, paths, intervals, process discovery, and logger. |
 | `Event` | Embed `agent-parser.ParsedEvent` and add `Harness`, `HarnessVersion`, `SessionID`, `SubagentID`, and `PID`. |
 | `Handler` | Accept events and optional acknowledgements; return an error to apply backpressure. |
 | `scanner` and `tailer` packages | Access lower-level discovery, process snapshots, cursor stores, and filesystem tailers. |
+
+# Session state
+
+`Session.State` is `working`, `waiting`, `idle`, or `unknown`. A live session in an unknown state is still running.
+
+| Harness | Source |
+| :--- | :--- |
+| Claude Code | The session file's undocumented `status`, measured on 2.1.310: `busy` is working, `waiting` is a pending approval, `idle` is idle. Any other value is unknown, including `shell`, whose meaning is not established. |
+| Pi, OpenCode | Not recorded, so always unknown. |
+
+Headless Claude Code sessions report `kind: interactive`; identify them by `Entrypoint == "sdk-cli"`.
 
 # Configuration
 

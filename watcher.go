@@ -80,7 +80,10 @@ type session struct {
 	// name is the display name, which unlike Data.Title includes derived names.
 	name string
 	// lastActive overrides Timestamp for harnesses that record activity separately.
-	lastActive int64
+	lastActive     int64
+	state          scanner.SessionState
+	stateUpdatedAt int64
+	entrypoint     string
 }
 
 type activeTail struct {
