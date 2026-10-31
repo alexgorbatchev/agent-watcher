@@ -407,24 +407,6 @@ func TestCodexScannerDiscoveryAndPairing(t *testing.T) {
 		t.Errorf("expected 1 active paired session, got %d", activeCount)
 	}
 
-	// Test with AGENT_STATUS_TEST_MOCK_PROC = "1"
-	t.Run("with AGENT_STATUS_TEST_MOCK_PROC", func(t *testing.T) {
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		mockEmptyFinder := func(ctx context.Context) ([]CodexProcessInfo, error) {
-			return nil, nil
-		}
-		mockScanner := NewCodexScanner(sessionsDir, mockEmptyFinder)
-		mockSessions, err := mockScanner.Scan(context.Background())
-		if err != nil {
-			t.Fatalf("mockScanner.Scan error: %v", err)
-		}
-		for _, s := range mockSessions {
-			if !s.IsActive || s.PID != 99993 {
-				t.Errorf("expected mock active session PID 99993, got %+v", s)
-			}
-		}
-	})
-
 	// Test NewCodexScanner with empty sessionsDir
 	defaultCodex := NewCodexScanner("", nil)
 	if defaultCodex.processFinder == nil {

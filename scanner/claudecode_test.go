@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -298,10 +299,6 @@ func TestProcessHelpers(t *testing.T) {
 			t.Errorf("PID 99999999 should not be alive")
 		}
 
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		if !IsProcessAlive(99999999) {
-			t.Errorf("expected mock alive with AGENT_STATUS_TEST_MOCK_PROC=1")
-		}
 	})
 
 	t.Run("VerifyProcessMatch", func(t *testing.T) {
@@ -333,10 +330,6 @@ func TestProcessHelpers(t *testing.T) {
 			}
 		}
 
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		if !VerifyProcessMatch(99999999, 12345) {
-			t.Errorf("expected mock match with AGENT_STATUS_TEST_MOCK_PROC=1")
-		}
 	})
 
 	t.Run("GetProcessCWD", func(t *testing.T) {
@@ -536,5 +529,44 @@ func TestClaudeCodeDescriptor_NameAndNameSource(t *testing.T) {
 	}
 	if desc.NameSource != "custom" {
 		t.Errorf("NameSource = %q, want 'custom'", desc.NameSource)
+	}
+}
+
+func TestLegacyMockEnvironmentDoesNotReviveDeadProcesses(t *testing.T) {
+	t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
+	const deadPID = 99999999
+
+	if IsProcessAlive(deadPID) {
+		t.Error("IsProcessAlive reported a dead process as alive")
+	}
+	if VerifyProcessMatch(deadPID, 12345) {
+		t.Error("VerifyProcessMatch matched a dead process")
+	}
+
+	dir := t.TempDir()
+	descriptor := fmt.Sprintf(`{"pid":%d,"sessionId":"dead","cwd":"/tmp"}`, deadPID)
+	if err := os.WriteFile(filepath.Join(dir, "dead.json"), []byte(descriptor), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := NewClaudeCodeScanner([]string{dir}).Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("dead session reported as live: %+v", sessions)
+	}
+
+	codexDir := t.TempDir()
+	rollout := `{"type":"session_meta","payload":{"id":"dead","cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout.jsonl"), []byte(rollout), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noProcesses := func(context.Context) ([]CodexProcessInfo, error) { return nil, nil }
+	codexSessions, err := NewCodexScanner(codexDir, noProcesses).Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(codexSessions) != 1 || codexSessions[0].IsActive {
+		t.Fatalf("rollout without a process reported as active: %+v", codexSessions)
 	}
 }

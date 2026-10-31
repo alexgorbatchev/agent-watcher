@@ -244,9 +244,6 @@ func (s *OpencodeScanner) Scan(ctx context.Context) ([]OpencodeSessionDescriptor
 					desc.StartedAt = bestProc.CreateTime
 				}
 				usedPIDs[bestProc.PID] = true
-			} else if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-				desc.PID = 99994
-				desc.IsActive = true
 			}
 		}
 

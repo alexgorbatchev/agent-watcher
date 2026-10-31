@@ -3,7 +3,6 @@ package scanner
 import (
 	"context"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,9 +77,6 @@ func (s *LiveProcessSnapshot) IsProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-		return true
-	}
 	if s.processes == nil {
 		return false
 	}
@@ -91,9 +87,6 @@ func (s *LiveProcessSnapshot) IsProcessAlive(pid int) bool {
 func (s *LiveProcessSnapshot) VerifyProcessMatch(pid int, expectedStartTime int64) bool {
 	if pid <= 0 {
 		return false
-	}
-	if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-		return true
 	}
 	if !s.IsProcessAlive(pid) {
 		return false

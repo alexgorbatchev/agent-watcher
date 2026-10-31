@@ -115,14 +115,10 @@ func (s *ClaudeCodeScanner) Scan() ([]SessionDescriptor, error) {
 	}
 
 	hasAliveCandidate := false
-	if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-		hasAliveCandidate = true
-	} else {
-		for _, desc := range candidates {
-			if isPIDAliveProbe(desc.PID) {
-				hasAliveCandidate = true
-				break
-			}
+	for _, desc := range candidates {
+		if isPIDAliveProbe(desc.PID) {
+			hasAliveCandidate = true
+			break
 		}
 	}
 
@@ -131,7 +127,7 @@ func (s *ClaudeCodeScanner) Scan() ([]SessionDescriptor, error) {
 	}
 
 	var snap ProcessSnapshot
-	if s.snapshotProvider != nil && os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") != "1" {
+	if s.snapshotProvider != nil {
 		snap, _ = s.snapshotProvider.GetSnapshot(context.Background())
 	}
 
@@ -142,21 +138,19 @@ func (s *ClaudeCodeScanner) Scan() ([]SessionDescriptor, error) {
 			continue
 		}
 
-		if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") != "1" {
-			if snap != nil {
-				if !snap.IsProcessAlive(desc.PID) {
-					continue
-				}
-				if desc.StartedAt > 0 && !snap.VerifyProcessMatch(desc.PID, desc.StartedAt) {
-					continue
-				}
-			} else {
-				if !IsProcessAlive(desc.PID) {
-					continue
-				}
-				if desc.StartedAt > 0 && !VerifyProcessMatch(desc.PID, desc.StartedAt) {
-					continue
-				}
+		if snap != nil {
+			if !snap.IsProcessAlive(desc.PID) {
+				continue
+			}
+			if desc.StartedAt > 0 && !snap.VerifyProcessMatch(desc.PID, desc.StartedAt) {
+				continue
+			}
+		} else {
+			if !IsProcessAlive(desc.PID) {
+				continue
+			}
+			if desc.StartedAt > 0 && !VerifyProcessMatch(desc.PID, desc.StartedAt) {
+				continue
 			}
 		}
 

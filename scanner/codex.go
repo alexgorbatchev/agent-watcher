@@ -460,9 +460,6 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 				cand.desc.StartedAt = bestProc.CreateTime
 			}
 			usedPIDs[bestProc.PID] = true
-		} else if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-			cand.desc.PID = 99993
-			cand.desc.IsActive = true
 		}
 
 		descriptors = append(descriptors, cand.desc)

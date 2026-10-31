@@ -207,10 +207,6 @@ func TestLiveProcessSnapshot(t *testing.T) {
 			t.Errorf("PID 99999999 should not be alive")
 		}
 
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		if !snap.IsProcessAlive(99999999) {
-			t.Errorf("expected mock alive with AGENT_STATUS_TEST_MOCK_PROC=1")
-		}
 	})
 
 	t.Run("VerifyProcessMatch", func(t *testing.T) {
@@ -253,10 +249,6 @@ func TestLiveProcessSnapshot(t *testing.T) {
 			t.Errorf("alive PID with zero createTime should return true as fallback")
 		}
 
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		if !snap.VerifyProcessMatch(99999999, 12345) {
-			t.Errorf("expected mock match with AGENT_STATUS_TEST_MOCK_PROC=1")
-		}
 	})
 
 	t.Run("Harness process lists", func(t *testing.T) {

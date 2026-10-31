@@ -105,7 +105,7 @@ Explicit paths take precedence over environment-based defaults.
 | `ProcessSnapshotProvider` | Live process discovery | Supply process snapshots for embedded applications or tests. |
 | `Logger` | `slog.Default()` | Receive structured logs with concise snake_case messages. |
 
-Nonpositive durations use their defaults. Missing harness storage produces no sessions. The inherited `AGENT_STATUS_TEST_MOCK_PROC=1` test override bypasses process verification; keep it unset in applications.
+Nonpositive durations use their defaults. Missing harness storage produces no sessions.
 
 # License
 

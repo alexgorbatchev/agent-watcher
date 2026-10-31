@@ -413,9 +413,6 @@ func (s *PiScanner) Scan(ctx context.Context) ([]PiSessionDescriptor, error) {
 				cand.desc.StartedAt = bestProc.CreateTime
 			}
 			usedPIDs[bestProc.PID] = true
-		} else if os.Getenv("AGENT_STATUS_TEST_MOCK_PROC") == "1" {
-			cand.desc.PID = 99992
-			cand.desc.IsActive = true
 		}
 
 		descriptors = append(descriptors, cand.desc)

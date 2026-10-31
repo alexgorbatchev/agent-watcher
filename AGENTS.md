@@ -27,7 +27,7 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 - OpenCode message watching is part of this library: use `agent-parser`'s read-only database API, emit changed message/part events, and checkpoint database revisions separately from transcript byte offsets. Drain final messages before emitting exit.
 - OpenCode child sessions share their parent's process. Completed assistant usage is checkpointed once per message, including across restart.
 - Logger injection uses `*slog.Logger`; messages are concise snake_case actions. Consumers choose output formatting.
-- The inherited `AGENT_STATUS_TEST_MOCK_PROC` override is test-only. Prefer `Config.ProcessSnapshotProvider` in new tests.
+- Tests fake processes with `Config.ProcessSnapshotProvider`, `SetProcessSnapshotProvider`, or a process finder; production code has no environment override.
 
 ## Gotchas
 

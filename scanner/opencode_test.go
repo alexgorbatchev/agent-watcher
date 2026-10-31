@@ -203,31 +203,6 @@ func TestOpencodeScannerDiscoveryAndPairing(t *testing.T) {
 		t.Errorf("expected 1 subagent session, got %d", subagentCount)
 	}
 
-	// Test with AGENT_STATUS_TEST_MOCK_PROC = "1"
-	t.Run("with AGENT_STATUS_TEST_MOCK_PROC", func(t *testing.T) {
-		t.Setenv("AGENT_STATUS_TEST_MOCK_PROC", "1")
-		mockEmptyFinder := func(ctx context.Context) ([]OpencodeProcessInfo, error) {
-			return nil, nil
-		}
-		mockScanner := NewOpencodeScanner(dbPath, mockEmptyFinder)
-		mockSessions, err := mockScanner.Scan(context.Background())
-		if err != nil {
-			t.Fatalf("mockScanner.Scan error: %v", err)
-		}
-		for _, s := range mockSessions {
-			switch s.SessionID {
-			case "ses_1", "ses_3":
-				if !s.IsActive || s.PID != 99994 {
-					t.Errorf("expected active session PID 99994, got %+v", s)
-				}
-			case "ses_2":
-				if s.IsActive {
-					t.Errorf("expected archived session to remain inactive")
-				}
-			}
-		}
-	})
-
 	// Test NewOpencodeScanner with empty dbPath
 	defaultScanner := NewOpencodeScanner("", nil)
 	if defaultScanner.processFinder == nil {
