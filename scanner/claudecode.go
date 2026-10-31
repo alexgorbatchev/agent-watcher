@@ -171,7 +171,7 @@ func (s *ClaudeCodeScanner) Scan() ([]SessionDescriptor, error) {
 		}
 
 		if desc.TranscriptPath == "" && desc.SessionID != "" {
-			desc.TranscriptPath = locateTranscript(desc.SessionID, desc.CWD, s.projectsDir)
+			desc.TranscriptPath = LocateClaudeTranscript(desc.SessionID, desc.CWD, s.projectsDir)
 		}
 
 		seenPIDs[desc.PID] = true
@@ -215,7 +215,11 @@ func (s *ClaudeCodeScanner) DiscoverSubagents(desc SessionDescriptor) ([]Subagen
 	return results, nil
 }
 
-func locateTranscript(sessionID, cwd, projectsDir string) string {
+// LocateClaudeTranscript finds a session's transcript by session ID. Unlike Scan it
+// needs no running process, so it also finds the transcript of a dead session.
+// projectsDir overrides the default locations; empty uses them. It returns "" when
+// no transcript exists.
+func LocateClaudeTranscript(sessionID, cwd, projectsDir string) string {
 	var projectsDirs []string
 
 	if projectsDir != "" {

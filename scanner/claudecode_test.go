@@ -67,7 +67,7 @@ func TestLocateTranscript(t *testing.T) {
 		exactPath = eval
 	}
 
-	found := locateTranscript(sessionID, cwd, "")
+	found := LocateClaudeTranscript(sessionID, cwd, "")
 	if found != exactPath {
 		t.Errorf("locateTranscript exact slug = %q, want %q", found, exactPath)
 	}
@@ -81,7 +81,7 @@ func TestLocateTranscript(t *testing.T) {
 	if eval, err := filepath.EvalSymlinks(noDashPath); err == nil {
 		noDashPath = eval
 	}
-	foundNoDash := locateTranscript("sess-nodash", "/Users/dev/my-project-nodash", "")
+	foundNoDash := LocateClaudeTranscript("sess-nodash", "/Users/dev/my-project-nodash", "")
 	if foundNoDash != noDashPath {
 		t.Errorf("locateTranscript exact slug no dash = %q, want %q", foundNoDash, noDashPath)
 	}
@@ -100,13 +100,13 @@ func TestLocateTranscript(t *testing.T) {
 		nestedPath = eval
 	}
 
-	foundNested := locateTranscript(nestedSessionID, "/some/nonexistent/cwd", "")
+	foundNested := LocateClaudeTranscript(nestedSessionID, "/some/nonexistent/cwd", "")
 	if foundNested != nestedPath {
 		t.Errorf("locateTranscript nested search = %q, want %q", foundNested, nestedPath)
 	}
 
 	// 3. Fallback when not found anywhere
-	notFound := locateTranscript("nonexistent-session-id", "/nowhere", "")
+	notFound := LocateClaudeTranscript("nonexistent-session-id", "/nowhere", "")
 	if notFound != "" {
 		t.Errorf("locateTranscript nonexistent = %q, want empty string", notFound)
 	}
@@ -123,7 +123,7 @@ func TestLocateTranscript(t *testing.T) {
 			expectedPath = customTransPath
 		}
 
-		found := locateTranscript("custom-sess", "", "")
+		found := LocateClaudeTranscript("custom-sess", "", "")
 		if found != expectedPath && found != customTransPath {
 			t.Errorf("locateTranscript with CLAUDE_PROJECTS_DIR = %q, want %q", found, expectedPath)
 		}

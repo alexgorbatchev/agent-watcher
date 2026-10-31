@@ -84,6 +84,7 @@ This handler acknowledges after writing to stdout. A durable consumer acknowledg
 | `Config` | Choose harnesses, paths, intervals, process discovery, and logger. |
 | `Event` | Embed `agent-parser.ParsedEvent` and add `Harness`, `HarnessVersion`, `SessionID`, `SubagentID`, and `PID`. |
 | `Handler` | Accept events and optional acknowledgements; return an error to apply backpressure. |
+| `scanner.LocateClaudeTranscript(sessionID, cwd, projectsDir)` | Find the transcript of a Claude Code session that may no longer be running; a snapshot does not list a dead session. |
 | `scanner` and `tailer` packages | Access lower-level discovery, process snapshots, cursor stores, and filesystem tailers. |
 
 # Session state
