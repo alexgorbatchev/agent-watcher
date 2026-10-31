@@ -21,6 +21,7 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 
 - Read applicable skills before writing code; use Go 1.26.2+ conventions.
 - `watcher.Run` owns workers and joins them on cancellation. Handlers may run concurrently and must respect their context.
+- `Snapshot` and `Snapshotter` share `discovery` with `Run` and never touch cursors, tailers, or the session tracker. Page actions and other one-shot callers use them, not `Run`.
 - `scanner/` discovers sessions with one shared process snapshot per tick; `tailer/` owns filesystem watches and byte cursors. Keep event parsing in `agent-parser`.
 - Transcript acknowledgement represents every event in one source line. Commit only a contiguous acknowledged prefix and bind callbacks to the file generation to reject acknowledgements from replaced files.
 - Cursor pruning preserves existing transcripts with matching device and inode regardless of age; remove checkpoints for deleted or replaced files. Age retention applies to inaccessible files.
@@ -52,6 +53,7 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 
 - Public entry point and contract: `watcher.go`
 - Discovery and lifecycle: `discovery.go`, `scanner/`
+- One-shot session lists: `snapshot.go`
 - Transcript delivery and checkpoints: `transcript.go`, `delivery.go`, `tailer/`
 - Database delivery and checkpoints: `opencode.go`, `checkpoint.go`
 - Parser and canonical harness schemas: `github.com/alexgorbatchev/agent-parser`

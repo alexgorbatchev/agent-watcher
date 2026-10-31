@@ -78,6 +78,9 @@ This handler acknowledges after writing to stdout. A durable consumer acknowledg
 | Export | Purpose |
 | :--- | :--- |
 | `Run(ctx, config, handler) error` | Own discovery, watching, worker shutdown, and checkpoint persistence. Normal cancellation returns nil; an already cancelled context returns its error without I/O. |
+| `Snapshot(ctx, config) ([]Session, error)` | List the sessions running now, one shot. Reads no transcript history and needs no cursors, tailers, session tracker, or handler. A harness that fails does not hide the others: the sessions found are returned with the joined error. |
+| `NewSnapshotter(config)`, `Snapshotter.Snapshot(ctx)` | The same list for callers that ask repeatedly; a reused `Snapshotter` keeps file caches. |
+| `Session` | Harness, version, session ID, PID, working directory, name, start time, last activity, subagent flag, and transcript path. Times are Unix milliseconds. Claude Code subagents are not listed: their transcripts remain after they finish. |
 | `Config` | Choose harnesses, paths, intervals, process discovery, and logger. |
 | `Event` | Embed `agent-parser.ParsedEvent` and add `Harness`, `HarnessVersion`, `SessionID`, `SubagentID`, and `PID`. |
 | `Handler` | Accept events and optional acknowledgements; return an error to apply backpressure. |

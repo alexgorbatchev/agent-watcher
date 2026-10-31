@@ -8,12 +8,37 @@ import (
 	"github.com/alexgorbatchev/agent-watcher/scanner"
 )
 
+// discovery holds one scanner per harness. Scanners keep file caches, so reusing
+// a discovery makes later scans cheaper than the first.
+type discovery struct {
+	claude   *scanner.ClaudeCodeScanner
+	pi       *scanner.PiScanner
+	codex    *scanner.CodexScanner
+	opencode *scanner.OpencodeScanner
+}
+
+func newDiscovery(cfg Config) *discovery {
+	d := &discovery{
+		claude:   scanner.NewClaudeCodeScanner(cfg.ClaudeSessionsDirs),
+		pi:       scanner.NewPiScanner(cfg.PiSessionsDir, nil),
+		codex:    scanner.NewCodexScanner(cfg.CodexSessionsDir, nil),
+		opencode: scanner.NewOpencodeScanner(cfg.OpencodeDBPath, nil),
+	}
+	d.claude.SetProjectsDir(cfg.ClaudeProjectsDir)
+	return d
+}
+
+// startTick shares one process table walk between the scanners of a scan.
+func (d *discovery) startTick(provider scanner.ProcessSnapshotProvider) {
+	tick := scanner.NewTickProcessSnapshotProvider(provider)
+	d.claude.SetProcessSnapshotProvider(tick)
+	d.pi.SetProcessSnapshotProvider(tick)
+	d.codex.SetProcessSnapshotProvider(tick)
+	d.opencode.SetProcessSnapshotProvider(tick)
+}
+
 func (r *runner) scan(ctx context.Context) {
-	provider := scanner.NewTickProcessSnapshotProvider(r.cfg.ProcessSnapshotProvider)
-	r.claude.SetProcessSnapshotProvider(provider)
-	r.pi.SetProcessSnapshotProvider(provider)
-	r.codex.SetProcessSnapshotProvider(provider)
-	r.opencode.SetProcessSnapshotProvider(provider)
+	r.startTick(r.cfg.ProcessSnapshotProvider)
 	for _, harness := range r.cfg.Harnesses {
 		sessions, err := r.discover(ctx, harness)
 		if err != nil {
@@ -28,17 +53,33 @@ func (r *runner) scan(ctx context.Context) {
 }
 
 func (r *runner) discover(ctx context.Context, harness Harness) ([]session, error) {
+	sessions, err := r.discovery.discover(ctx, harness)
+	if err != nil || harness != HarnessClaudeCode {
+		return sessions, err
+	}
+	for i := range sessions {
+		s := &sessions[i]
+		desc := scanner.SessionDescriptor{SessionID: s.SessionID, TranscriptPath: s.path}
+		s.subagents, err = r.claude.DiscoverSubagents(desc)
+		if err != nil {
+			r.logger.Warn("subagent_scan_failed", "sessionId", s.SessionID, "err", err)
+		}
+	}
+	return sessions, nil
+}
+
+func (d *discovery) discover(ctx context.Context, harness Harness) ([]session, error) {
 	var sessions []session
 	switch harness {
 	case HarnessClaudeCode:
-		found, err := r.claude.Scan()
+		found, err := d.claude.Scan()
 		if err != nil {
 			return nil, err
 		}
 		for _, desc := range found {
 			s := session{Event: Event{Harness: harness, HarnessVersion: desc.HarnessVersion,
 				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD}},
-				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: true}
+				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: true, name: desc.Name}
 			if desc.NameSource == "custom" && desc.Name != "" {
 				s.Data.Title = &desc.Name
 			}
@@ -48,14 +89,10 @@ func (r *runner) discover(ctx context.Context, harness Harness) ([]session, erro
 					s.Timestamp = startTimestamp(desc.StartedAt, last)
 				}
 			}
-			s.subagents, err = r.claude.DiscoverSubagents(desc)
-			if err != nil {
-				r.logger.Warn("subagent_scan_failed", "sessionId", desc.SessionID, "err", err)
-			}
 			sessions = append(sessions, s)
 		}
 	case HarnessPi:
-		found, err := r.pi.Scan(ctx)
+		found, err := d.pi.Scan(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -66,7 +103,7 @@ func (r *runner) discover(ctx context.Context, harness Harness) ([]session, erro
 				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: desc.IsActive})
 		}
 	case HarnessCodex:
-		found, err := r.codex.Scan(ctx)
+		found, err := d.codex.Scan(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -74,14 +111,15 @@ func (r *runner) discover(ctx context.Context, harness Harness) ([]session, erro
 			s := session{Event: Event{Harness: harness, HarnessVersion: desc.HarnessVersion,
 				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD,
 					Timestamp: startTimestamp(desc.StartedAt, desc.LastActive)}},
-				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: desc.IsActive}
+				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: desc.IsActive,
+				name: desc.AgentNickname}
 			if desc.IsSubagent && desc.ParentThreadID != "" {
 				s.SubagentID = &desc.SessionID
 			}
 			sessions = append(sessions, s)
 		}
 	case HarnessOpencode:
-		found, err := r.opencode.Scan(ctx)
+		found, err := d.opencode.Scan(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +127,7 @@ func (r *runner) discover(ctx context.Context, harness Harness) ([]session, erro
 			s := session{Event: Event{Harness: harness, HarnessVersion: desc.HarnessVersion,
 				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD,
 					Timestamp: startTimestamp(desc.StartedAt, 0)}},
-				startedAt: desc.StartedAt, active: desc.IsActive}
+				startedAt: desc.StartedAt, active: desc.IsActive, name: desc.Title, lastActive: desc.UpdatedAt}
 			if desc.IsSubagent && desc.ParentID != "" {
 				s.SubagentID = &desc.SessionID
 			}

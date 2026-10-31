@@ -77,6 +77,10 @@ type session struct {
 	startedAt int64
 	active    bool
 	subagents []scanner.SubagentTranscript
+	// name is the display name, which unlike Data.Title includes derived names.
+	name string
+	// lastActive overrides Timestamp for harnesses that record activity separately.
+	lastActive int64
 }
 
 type activeTail struct {
@@ -87,6 +91,7 @@ type activeTail struct {
 }
 
 type runner struct {
+	*discovery
 	cfg         Config
 	handler     Handler
 	logger      *slog.Logger
@@ -94,10 +99,6 @@ type runner struct {
 	checkpoints *checkpointStore
 	tracker     *scanner.SessionTracker
 	registry    *tailer.WatcherRegistry
-	claude      *scanner.ClaudeCodeScanner
-	pi          *scanner.PiScanner
-	codex       *scanner.CodexScanner
-	opencode    *scanner.OpencodeScanner
 	active      map[Harness]map[string]session
 	tails       map[string]*activeTail
 	subagents   map[string]map[string]bool
@@ -111,15 +112,9 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 	if handler == nil {
 		return fmt.Errorf("event handler is required")
 	}
-	if len(cfg.Harnesses) == 0 {
-		cfg.Harnesses = []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode}
-	}
-	for _, harness := range cfg.Harnesses {
-		switch harness {
-		case HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode:
-		default:
-			return fmt.Errorf("unsupported harness: %q", harness)
-		}
+	cfg, err := cfg.withDiscoveryDefaults()
+	if err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -128,9 +123,6 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 	cfg.CursorRetention = positiveDuration(cfg.CursorRetention, defaultCursorRetention)
 	cfg.CursorPruneInterval = positiveDuration(cfg.CursorPruneInterval, defaultPruneInterval)
 	cfg.CursorFlushInterval = positiveDuration(cfg.CursorFlushInterval, defaultFlushInterval)
-	if cfg.ProcessSnapshotProvider == nil {
-		cfg.ProcessSnapshotProvider = scanner.NewLiveProcessSnapshotProvider()
-	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -159,16 +151,12 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 		return fmt.Errorf("initializing watcher registry: %w", err)
 	}
 	r := &runner{
-		cfg: cfg, handler: handler, logger: logger, cursors: cursors,
+		discovery: newDiscovery(cfg),
+		cfg:       cfg, handler: handler, logger: logger, cursors: cursors,
 		tracker: tracker, registry: registry, checkpoints: checkpoints,
-		claude:   scanner.NewClaudeCodeScanner(cfg.ClaudeSessionsDirs),
-		pi:       scanner.NewPiScanner(cfg.PiSessionsDir, nil),
-		codex:    scanner.NewCodexScanner(cfg.CodexSessionsDir, nil),
-		opencode: scanner.NewOpencodeScanner(cfg.OpencodeDBPath, nil),
-		active:   make(map[Harness]map[string]session), tails: make(map[string]*activeTail),
+		active: make(map[Harness]map[string]session), tails: make(map[string]*activeTail),
 		subagents: make(map[string]map[string]bool),
 	}
-	r.claude.SetProjectsDir(cfg.ClaudeProjectsDir)
 	for id, tracked := range tracker.GetAll() {
 		if tracked.IsActive {
 			harness := Harness(tracked.Harness)
@@ -201,6 +189,24 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 			r.scan(ctx)
 		}
 	}
+}
+
+// withDiscoveryDefaults validates the fields discovery reads and fills in their defaults.
+func (cfg Config) withDiscoveryDefaults() (Config, error) {
+	if len(cfg.Harnesses) == 0 {
+		cfg.Harnesses = []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode}
+	}
+	for _, harness := range cfg.Harnesses {
+		switch harness {
+		case HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode:
+		default:
+			return cfg, fmt.Errorf("unsupported harness: %q", harness)
+		}
+	}
+	if cfg.ProcessSnapshotProvider == nil {
+		cfg.ProcessSnapshotProvider = scanner.NewLiveProcessSnapshotProvider()
+	}
+	return cfg, nil
 }
 
 func positiveDuration(value, fallback time.Duration) time.Duration {
