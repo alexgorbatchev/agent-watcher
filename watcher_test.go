@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -426,6 +427,18 @@ func TestRunStartAtEndSkipsOpencodeHistory(t *testing.T) {
 	events := make(chan Event, 64)
 	startTestWatcher(t, cfg, collectEvents(events))
 	awaitEvent(t, events, "run_started")
+	// A row written during the first scan counts as history, so wait until that scan has recorded the old message.
+	deadline := time.Now().Add(testWait)
+	for {
+		data, err := os.ReadFile(cfg.CursorPath + ".opencode")
+		if err == nil && strings.Contains(string(data), "old") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first scan recorded no history")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	execTestSQL(t, db, `INSERT INTO message VALUES ('new','session',3,'{"role":"user"}')`)
 	execTestSQL(t, db, `INSERT INTO part VALUES ('new-prompt','new','session',3,'{"type":"text","text":"new"}')`)
