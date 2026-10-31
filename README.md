@@ -106,8 +106,8 @@ Explicit paths take precedence over environment-based defaults.
 | :--- | :--- | :--- |
 | `Harnesses` | All four harnesses | Select `HarnessClaudeCode`, `HarnessPi`, `HarnessCodex`, or `HarnessOpencode`. |
 | `ScanInterval` | `2s` | Discovery and database polling interval. |
-| `ClaudeSessionsDirs` | Harness defaults | `$CLAUDE_SESSIONS_DIR`, ai-registry session storage under `$XDG_DATA_HOME` or `~/.local/share`, and `~/.claude/sessions`. |
-| `ClaudeProjectsDir` | Harness defaults | Transcript lookup checks `$CLAUDE_PROJECTS_DIR`, ai-registry project storage, and `~/.claude/projects`. |
+| `ClaudeSessionsDirs` | Harness defaults | `$CLAUDE_SESSIONS_DIR`, ai-registry session storage under `$XDG_DATA_HOME` or `~/.local/share`, `$CLAUDE_CONFIG_DIR/sessions`, and `~/.claude/sessions`. |
+| `ClaudeProjectsDir` | Harness defaults | Transcript lookup checks `$CLAUDE_PROJECTS_DIR`, ai-registry project storage, `$CLAUDE_CONFIG_DIR/projects`, and `~/.claude/projects`. |
 | `PiSessionsDir` | Harness defaults | `$PI_SESSIONS_DIR`, `$PI_CODING_AGENT_DIR/sessions`, or `~/.pi/agent/sessions`. |
 | `CodexSessionsDir` | Harness defaults | `$CODEX_SESSIONS_DIR`, `$CODEX_HOME/sessions`, or `~/.codex/sessions`. |
 | `OpencodeDBPath` | Harness defaults | `$OPENCODE_DB_PATH`, `$XDG_DATA_HOME/opencode/opencode.db`, or `~/.local/share/opencode/opencode.db`. |

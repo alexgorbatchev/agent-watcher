@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -568,5 +569,43 @@ func TestLegacyMockEnvironmentDoesNotReviveDeadProcesses(t *testing.T) {
 	}
 	if len(codexSessions) != 1 || codexSessions[0].IsActive {
 		t.Fatalf("rollout without a process reported as active: %+v", codexSessions)
+	}
+}
+
+func TestClaudeConfigDirRelocatesSessionsAndTranscripts(t *testing.T) {
+	home := t.TempDir()
+	configDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("CLAUDE_SESSIONS_DIR", "")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	sessionsDir := filepath.Join(configDir, "sessions")
+	projectDir := filepath.Join(configDir, "projects", "project")
+	for _, dir := range []string{sessionsDir, projectDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	descriptor := fmt.Sprintf(`{"pid":%d,"sessionId":"relocated","cwd":"/work"}`, os.Getpid())
+	if err := os.WriteFile(filepath.Join(sessionsDir, "1.json"), []byte(descriptor), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(projectDir, "relocated.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := NewClaudeCodeScanner(nil).Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "relocated" || sessions[0].TranscriptPath != transcript {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+
+	dirs := DefaultClaudeSessionDirs()
+	if !slices.Contains(dirs, filepath.Join(home, ".claude", "sessions")) {
+		t.Fatalf("default session directory dropped: %v", dirs)
 	}
 }

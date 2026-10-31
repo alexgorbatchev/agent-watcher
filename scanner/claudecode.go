@@ -56,10 +56,24 @@ func DefaultClaudeSessionDirs() []string {
 		dirs = append(dirs, filepath.Join(home, ".local", "share", "ai-registry", "claude-code", "sessions"))
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "sessions"))
+	for _, configDir := range claudeConfigDirs() {
+		dirs = append(dirs, filepath.Join(configDir, "sessions"))
 	}
 
+	return dirs
+}
+
+// claudeConfigDirs returns CLAUDE_CONFIG_DIR, where Claude Code writes sessions and
+// transcripts when it is set, then the default. The default stays because agents
+// can run with a different environment from the process scanning for them.
+func claudeConfigDirs() []string {
+	var dirs []string
+	if custom := os.Getenv("CLAUDE_CONFIG_DIR"); custom != "" {
+		dirs = append(dirs, custom)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".claude"))
+	}
 	return dirs
 }
 
@@ -216,8 +230,8 @@ func locateTranscript(sessionID, cwd, projectsDir string) string {
 		projectsDirs = append(projectsDirs, filepath.Join(home, ".local", "share", "ai-registry", "claude-code", "projects"))
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
-		projectsDirs = append(projectsDirs, filepath.Join(home, ".claude", "projects"))
+	for _, configDir := range claudeConfigDirs() {
+		projectsDirs = append(projectsDirs, filepath.Join(configDir, "projects"))
 	}
 
 	targetFileName := fmt.Sprintf("%s.jsonl", sessionID)
