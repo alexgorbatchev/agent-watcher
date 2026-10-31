@@ -1031,3 +1031,135 @@ func main() {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func codexEventLine(t *testing.T, eventType string, at time.Time) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"type":      "event_msg",
+		"timestamp": at.UTC().Format(time.RFC3339Nano),
+		"payload":   map[string]any{"type": eventType},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line) + "\n"
+}
+
+func TestCodexStateComesFromTheLastTurnBoundary(t *testing.T) {
+	cwd := "/work/project"
+	now := time.Now().Truncate(time.Millisecond)
+	started := now.Add(-time.Minute)
+	output := fmt.Sprintf(`{"type":"response_item","timestamp":%q,"payload":{"type":"message","text":"task_complete"}}`, now.UTC().Format(time.RFC3339Nano)) + "\n"
+
+	tests := []struct {
+		name      string
+		events    string
+		createdAt time.Time
+		want      SessionState
+		wantAt    int64
+	}{
+		{name: "turn running", events: codexEventLine(t, "task_started", started) + output, createdAt: started.Add(-time.Hour), want: SessionStateWorking, wantAt: started.UnixMilli()},
+		{name: "turn complete", events: codexEventLine(t, "task_started", started) + codexEventLine(t, "task_complete", now), createdAt: started.Add(-time.Hour), want: SessionStateIdle, wantAt: now.UnixMilli()},
+		{name: "turn aborted", events: codexEventLine(t, "task_started", started) + codexEventLine(t, "turn_aborted", now), createdAt: started.Add(-time.Hour), want: SessionStateIdle, wantAt: now.UnixMilli()},
+		{name: "renamed turn event", events: codexEventLine(t, "turn_started", started), createdAt: started.Add(-time.Hour), want: SessionStateWorking, wantAt: started.UnixMilli()},
+		{name: "no turn yet", events: output, createdAt: started.Add(-time.Hour), want: SessionStateUnknown},
+		{name: "turn orphaned by a resumed process", events: codexEventLine(t, "task_started", started), createdAt: now, want: SessionStateIdle, wantAt: started.UnixMilli()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			meta := map[string]any{"id": "s", "cwd": cwd, "timestamp": tt.createdAt.Format(time.RFC3339Nano)}
+			path := writeCodexRollout(t, dir, "s.jsonl", meta, now)
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString(tt.events); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			finder := func(context.Context) ([]CodexProcessInfo, error) {
+				return []CodexProcessInfo{{PID: 300, ParentPID: 1, CWD: cwd, CreateTime: tt.createdAt.UnixMilli()}}, nil
+			}
+			sessions, err := NewCodexScanner(dir, finder).Scan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sessions) != 1 || !sessions[0].IsActive {
+				t.Fatalf("sessions = %+v", sessions)
+			}
+			if sessions[0].State != tt.want || sessions[0].StateUpdatedAt != tt.wantAt {
+				t.Fatalf("state = %s at %d, want %s at %d", sessions[0].State, sessions[0].StateUpdatedAt, tt.want, tt.wantAt)
+			}
+		})
+	}
+}
+
+func TestCodexStateFollowsARolloutThatChanges(t *testing.T) {
+	dir := t.TempDir()
+	cwd := "/work/project"
+	started := time.Now().Add(-time.Minute)
+	meta := map[string]any{"id": "s", "cwd": cwd, "timestamp": started.Format(time.RFC3339Nano)}
+	path := writeCodexRollout(t, dir, "s.jsonl", meta, started)
+	appendEvent := func(line string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = file.Close() }()
+		if _, err := file.WriteString(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finder := func(context.Context) ([]CodexProcessInfo, error) {
+		return []CodexProcessInfo{{PID: 300, ParentPID: 1, CWD: cwd, CreateTime: started.UnixMilli() - 1000}}, nil
+	}
+	scanner := NewCodexScanner(dir, finder)
+	stateAfter := func() SessionState {
+		t.Helper()
+		sessions, err := scanner.Scan(context.Background())
+		if err != nil || len(sessions) != 1 {
+			t.Fatalf("Scan = %+v, %v", sessions, err)
+		}
+		return sessions[0].State
+	}
+
+	appendEvent(codexEventLine(t, "task_started", started))
+	if got := stateAfter(); got != SessionStateWorking {
+		t.Fatalf("state = %s, want working", got)
+	}
+	appendEvent(codexEventLine(t, "task_complete", started.Add(time.Second)))
+	if got := stateAfter(); got != SessionStateIdle {
+		t.Fatalf("state = %s, want idle after the rollout changed", got)
+	}
+}
+
+func TestCodexStateStopsAtTheScanLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.jsonl")
+	padding := strings.Repeat("x", 1024*1024)
+	content := codexEventLine(t, "task_started", time.Now())
+	for size := 0; size <= maxCodexTurnScan; size += len(padding) {
+		content += `{"type":"response_item","text":"` + padding + `"}` + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := readCodexTurn(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.state != SessionStateUnknown {
+		t.Fatalf("state = %s, want unknown beyond the scan limit", turn.state)
+	}
+}
+
+func TestReadCodexTurnReportsMissingFile(t *testing.T) {
+	if _, err := readCodexTurn(filepath.Join(t.TempDir(), "missing.jsonl")); err == nil {
+		t.Fatal("missing rollout returned no error")
+	}
+}

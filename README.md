@@ -93,6 +93,7 @@ This handler acknowledges after writing to stdout. A durable consumer acknowledg
 | Harness | Source |
 | :--- | :--- |
 | Claude Code | The session file's undocumented `status`, measured on 2.1.310: `busy` is working, `waiting` is a pending approval, `idle` is idle. Any other value is unknown, including `shell`, whose meaning is not established. |
+| Codex | The last turn boundary in the rollout: `task_started` is working, `task_complete` and `turn_aborted` are idle. A turn older than the process belongs to a run that died and was resumed, so it counts as idle. No boundary in the last 32 MiB is unknown. Rollouts carry no approval events, so a turn waiting on one reads as working. |
 | Pi, OpenCode | Not recorded, so always unknown. |
 
 Headless Claude Code sessions report `kind: interactive`; identify them by `Entrypoint == "sdk-cli"`.

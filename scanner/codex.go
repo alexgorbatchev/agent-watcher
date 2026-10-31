@@ -29,6 +29,9 @@ type CodexSessionDescriptor struct {
 	AgentNickname  string `json:"agentNickname,omitempty"`
 	AgentRole      string `json:"agentRole,omitempty"`
 	IsSubagent     bool   `json:"isSubagent"`
+	// State is set for active sessions only.
+	State          SessionState `json:"state,omitempty"`
+	StateUpdatedAt int64        `json:"stateUpdatedAt,omitempty"`
 }
 
 type CodexProcessInfo struct {
@@ -73,6 +76,7 @@ type codexFileCacheEntry struct {
 	modTime    time.Time
 	header     *CodexSessionHeader
 	lastActive int64
+	turn       *codexTurn
 	dev        uint64
 	ino        uint64
 }
@@ -481,7 +485,47 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 	}
 
 	activateCodexSubagents(descriptors)
+	s.applyCodexTurnStates(descriptors, activeProcs)
 	return descriptors, nil
+}
+
+// applyCodexTurnStates reads rollouts only for active sessions, because a cold
+// scan otherwise pays for every rollout on the machine.
+func (s *CodexScanner) applyCodexTurnStates(sessions []CodexSessionDescriptor, procs []CodexProcessInfo) {
+	createTimes := make(map[int]int64, len(procs))
+	for _, proc := range procs {
+		createTimes[proc.PID] = proc.CreateTime
+	}
+	for i := range sessions {
+		session := &sessions[i]
+		if !session.IsActive {
+			continue
+		}
+		turn := s.codexTurn(session.TranscriptPath)
+		session.State = turn.state
+		session.StateUpdatedAt = turn.at
+		// A turn older than the process belongs to a run that died mid-turn and
+		// was resumed; nothing will ever complete it.
+		if turn.state == SessionStateWorking && turn.at < createTimes[session.PID] {
+			session.State = SessionStateIdle
+		}
+	}
+}
+
+func (s *CodexScanner) codexTurn(path string) codexTurn {
+	entry, cached := s.cache[path]
+	if cached && entry.turn != nil {
+		return *entry.turn
+	}
+	turn, err := readCodexTurn(path)
+	if err != nil {
+		return codexTurn{state: SessionStateUnknown}
+	}
+	if cached {
+		entry.turn = &turn
+		s.cache[path] = entry
+	}
+	return turn
 }
 
 // topLevelCodexProcesses drops processes started by another Codex process. The npm

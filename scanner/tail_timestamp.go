@@ -109,10 +109,41 @@ func ExtractLastActiveTimestamp(filePath string) (int64, error) {
 		return mtime, nil
 	}
 
+	var found int64
+	err = scanLinesBackward(file, fileSize, 0, func(line []byte) bool {
+		var entry map[string]interface{}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return true
+		}
+		if !isConversationalRecord(entry) {
+			return true
+		}
+		ts, ok := extractTimestampFromMap(entry)
+		if ok {
+			found = ts
+		}
+		return !ok
+	})
+	if err != nil {
+		return 0, err
+	}
+	if found != 0 {
+		return found, nil
+	}
+	return mtime, nil
+}
+
+// scanLinesBackward calls visit with each non-empty trimmed line from the end of
+// the file until visit returns false, or limit bytes have been read when limit is
+// positive.
+func scanLinesBackward(file io.ReaderAt, fileSize, limit int64, visit func(line []byte) bool) error {
 	cursor := fileSize
 	var remainder []byte
 
 	for cursor > 0 {
+		if limit > 0 && fileSize-cursor >= limit {
+			return nil
+		}
 		readSize := int64(tailChunkSize)
 		if cursor < readSize {
 			readSize = cursor
@@ -122,7 +153,7 @@ func ExtractLastActiveTimestamp(filePath string) (int64, error) {
 		chunk := make([]byte, readSize)
 		n, err := file.ReadAt(chunk, readStart)
 		if err != nil && err != io.EOF {
-			return 0, fmt.Errorf("reading transcript chunk at offset %d: %w", readStart, err)
+			return fmt.Errorf("reading transcript chunk at offset %d: %w", readStart, err)
 		}
 		chunk = chunk[:n]
 
@@ -159,23 +190,13 @@ func ExtractLastActiveTimestamp(filePath string) (int64, error) {
 			if len(line) == 0 {
 				continue
 			}
-
-			var entry map[string]interface{}
-			if err := json.Unmarshal(line, &entry); err != nil {
-				continue
-			}
-
-			if !isConversationalRecord(entry) {
-				continue
-			}
-
-			if ts, ok := extractTimestampFromMap(entry); ok {
-				return ts, nil
+			if !visit(line) {
+				return nil
 			}
 		}
 	}
 
-	return mtime, nil
+	return nil
 }
 
 // ExtractFirstActiveTimestamp reads from the beginning of a transcript file

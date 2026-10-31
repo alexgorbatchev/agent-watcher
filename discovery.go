@@ -113,7 +113,7 @@ func (d *discovery) discover(ctx context.Context, harness Harness) ([]session, e
 				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD,
 					Timestamp: startTimestamp(desc.StartedAt, desc.LastActive)}},
 				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: desc.IsActive,
-				name: desc.AgentNickname}
+				name: desc.AgentNickname, state: desc.State, stateUpdatedAt: desc.StateUpdatedAt}
 			if desc.IsSubagent && desc.ParentThreadID != "" {
 				s.SubagentID = &desc.SessionID
 			}
