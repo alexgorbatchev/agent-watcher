@@ -242,7 +242,7 @@ func TestRunReconcilesRestoredSessions(t *testing.T) {
 
 func createOpencodeFixture(t *testing.T, cfg Config) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite3", "file:"+cfg.OpencodeDBPath+"?mode=rwc")
+	db, err := sql.Open("sqlite", "file:"+cfg.OpencodeDBPath+"?mode=rwc")
 	if err != nil {
 		t.Fatal(err)
 	}

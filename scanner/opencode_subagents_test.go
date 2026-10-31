@@ -10,7 +10,7 @@ import (
 func TestOpencodeChildrenShareParentProcess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "opencode.db")
 	createTestOpencodeDB(t, path)
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=rwc")
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=rwc")
 	if err != nil {
 		t.Fatal(err)
 	}

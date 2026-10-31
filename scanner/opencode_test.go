@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "modernc.org/sqlite"
 )
 
 func TestDefaultOpencodeDBPath(t *testing.T) {
@@ -76,7 +76,7 @@ func createTestOpencodeDB(t *testing.T, dbPath string) {
 	} else {
 		dsn = "file:" + dbPath + "?mode=rwc"
 	}
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("creating test opencode db: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestOpencodeScannerDiscoveryAndPairing(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "opencode.db")
 	createTestOpencodeDB(t, dbPath)
 
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=rwc")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
 	if err != nil {
 		t.Fatalf("opening sqlite db: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestOpencodeScanner_MultipleSessionsAndResumed(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "opencode.db")
 	createTestOpencodeDB(t, dbPath)
 
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=rwc")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
 	if err != nil {
 		t.Fatalf("opening sqlite db: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestOpencodeScanner_SkipsProcessFinderWhenNoCandidateSessions(t *testing.T)
 	}
 
 	// Also test when all sessions in DB are archived
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=rwc")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
 	if err != nil {
 		t.Fatalf("opening sqlite db: %v", err)
 	}
