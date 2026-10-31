@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -883,5 +884,150 @@ func TestCodexScanner_SetProcessFinderAndProvider(t *testing.T) {
 	procs, err = scanner.processFinder(context.Background())
 	if err != nil || len(procs) != 1 || procs[0].PID != 102 {
 		t.Errorf("SetProcessSnapshotProvider failed: %v, %v", procs, err)
+	}
+}
+
+func writeCodexRollout(t *testing.T, dir, name string, meta map[string]any, modTime time.Time) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{"type": "session_meta", "payload": meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func activeCodexSessions(sessions []CodexSessionDescriptor) map[string]int {
+	active := make(map[string]int)
+	for _, session := range sessions {
+		if session.IsActive {
+			active[session.SessionID] = session.PID
+		}
+	}
+	return active
+}
+
+func TestCodexWrapperAndChildCountAsOneProcess(t *testing.T) {
+	dir := t.TempDir()
+	cwd := "/work/project"
+	base := time.Now().Add(-time.Hour)
+	stale := map[string]any{"id": "stale", "cwd": cwd, "timestamp": base.Format(time.RFC3339Nano)}
+	live := map[string]any{"id": "live", "cwd": cwd, "timestamp": base.Add(time.Minute).Format(time.RFC3339Nano)}
+	writeCodexRollout(t, dir, "stale.jsonl", stale, base)
+	writeCodexRollout(t, dir, "live.jsonl", live, base.Add(time.Minute))
+
+	finder := func(context.Context) ([]CodexProcessInfo, error) {
+		createTime := base.UnixMilli() - 1000
+		return []CodexProcessInfo{
+			{PID: 100, ParentPID: 1, CWD: cwd, CreateTime: createTime},
+			{PID: 101, ParentPID: 100, CWD: cwd, CreateTime: createTime},
+		}, nil
+	}
+	sessions, err := NewCodexScanner(dir, finder).Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	active := activeCodexSessions(sessions)
+	if len(active) != 1 || active["live"] != 100 {
+		t.Fatalf("active sessions = %v, want only live on the wrapper PID 100", active)
+	}
+}
+
+func TestCodexSubagentInheritsItsParentProcess(t *testing.T) {
+	dir := t.TempDir()
+	cwd := "/work/project"
+	base := time.Now().Add(-time.Hour)
+	timestamp := base.Format(time.RFC3339Nano)
+	root := map[string]any{"id": "root", "cwd": cwd, "timestamp": timestamp}
+	child := map[string]any{"id": "child", "cwd": cwd, "timestamp": timestamp, "parent_thread_id": "root"}
+	grandchild := map[string]any{"id": "grandchild", "cwd": cwd, "timestamp": timestamp, "parent_thread_id": "child"}
+	orphan := map[string]any{"id": "orphan", "cwd": cwd, "timestamp": timestamp, "parent_thread_id": "missing"}
+	writeCodexRollout(t, dir, "root.jsonl", root, base)
+	// The subagents wrote last, so a recency-ordered match would reach them first.
+	writeCodexRollout(t, dir, "child.jsonl", child, base.Add(time.Minute))
+	writeCodexRollout(t, dir, "grandchild.jsonl", grandchild, base.Add(2*time.Minute))
+	writeCodexRollout(t, dir, "orphan.jsonl", orphan, base.Add(3*time.Minute))
+
+	finder := func(context.Context) ([]CodexProcessInfo, error) {
+		return []CodexProcessInfo{{PID: 200, ParentPID: 1, CWD: cwd, CreateTime: base.UnixMilli() - 1000}}, nil
+	}
+	sessions, err := NewCodexScanner(dir, finder).Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	active := activeCodexSessions(sessions)
+	want := map[string]int{"root": 200, "child": 200, "grandchild": 200}
+	if !reflect.DeepEqual(active, want) {
+		t.Fatalf("active sessions = %v, want %v", active, want)
+	}
+}
+
+func TestSnapshotDoesNotCountCodexChildProcess(t *testing.T) {
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(cwd, "main.go")
+	program := `package main
+import ("os"; "os/exec"; "time")
+func main() {
+	if len(os.Args) == 1 {
+		cmd := exec.Command(os.Args[0], "child")
+		if err := cmd.Start(); err != nil { panic(err) }
+	}
+	time.Sleep(10 * time.Second)
+}
+`
+	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(cwd, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cwd, "bin", "codex")
+	if output, err := exec.Command("go", "build", "-o", path, source).CombinedOutput(); err != nil {
+		t.Fatalf("building process fixture: %v\n%s", err, output)
+	}
+	cmd := exec.Command(path)
+	cmd.Dir = cwd
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, err := CaptureProcessSnapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found []CodexProcessInfo
+		for _, proc := range snapshot.CodexProcesses() {
+			if proc.CWD == cwd {
+				found = append(found, proc)
+			}
+		}
+		if len(found) == 2 {
+			topLevel := topLevelCodexProcesses(found)
+			if len(topLevel) != 1 || topLevel[0].PID != cmd.Process.Pid {
+				t.Fatalf("top level = %+v, want the launcher PID %d", topLevel, cmd.Process.Pid)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("found %+v, want launcher and child", found)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -33,6 +33,7 @@ type CodexSessionDescriptor struct {
 
 type CodexProcessInfo struct {
 	PID        int
+	ParentPID  int
 	CWD        string
 	CreateTime int64 // unix millis
 }
@@ -139,8 +140,14 @@ func LiveCodexProcessFinder(ctx context.Context) ([]CodexProcessInfo, error) {
 			createTime = 0
 		}
 
+		parentPID, err := p.PpidWithContext(ctx)
+		if err != nil {
+			parentPID = 0
+		}
+
 		results = append(results, CodexProcessInfo{
 			PID:        int(p.Pid),
+			ParentPID:  int(parentPID),
 			CWD:        filepath.Clean(cwd),
 			CreateTime: createTime,
 		})
@@ -395,6 +402,7 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 	if s.processFinder != nil {
 		activeProcs, _ = s.processFinder(ctx)
 	}
+	activeProcs = topLevelCodexProcesses(activeProcs)
 
 	procsByCWD := make(map[string][]CodexProcessInfo)
 	for _, proc := range activeProcs {
@@ -423,6 +431,13 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 
 	for i := range candidates {
 		cand := &candidates[i]
+		// Subagents run inside their parent's process and must not consume a
+		// process match, or a recent subagent would take its parent's only PID.
+		if cand.desc.ParentThreadID != "" {
+			descriptors = append(descriptors, cand.desc)
+			continue
+		}
+
 		candidateProcs := procsByCWD[cand.cleanCWD]
 		var bestProc *CodexProcessInfo
 		var minDiff int64 = 1<<62 - 1
@@ -465,5 +480,48 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 		descriptors = append(descriptors, cand.desc)
 	}
 
+	activateCodexSubagents(descriptors)
 	return descriptors, nil
+}
+
+// topLevelCodexProcesses drops processes started by another Codex process. The npm
+// launcher runs the native binary as a child, so one agent appears twice, and the
+// spare PID would otherwise claim a second rollout from the same directory.
+func topLevelCodexProcesses(procs []CodexProcessInfo) []CodexProcessInfo {
+	pids := make(map[int]bool, len(procs))
+	for _, proc := range procs {
+		pids[proc.PID] = true
+	}
+	topLevel := make([]CodexProcessInfo, 0, len(procs))
+	for _, proc := range procs {
+		if !pids[proc.ParentPID] {
+			topLevel = append(topLevel, proc)
+		}
+	}
+	return topLevel
+}
+
+// activateCodexSubagents gives each subagent rollout the process of its nearest
+// active ancestor. Follow ancestors so discovery order is immaterial.
+func activateCodexSubagents(sessions []CodexSessionDescriptor) {
+	byID := make(map[string]*CodexSessionDescriptor, len(sessions))
+	for i := range sessions {
+		byID[sessions[i].SessionID] = &sessions[i]
+	}
+	for i := range sessions {
+		child := &sessions[i]
+		visited := map[string]bool{child.SessionID: true}
+		for parentID := child.ParentThreadID; parentID != "" && !visited[parentID]; {
+			visited[parentID] = true
+			parent := byID[parentID]
+			if parent == nil {
+				break
+			}
+			if parent.IsActive {
+				child.PID, child.IsActive = parent.PID, true
+				break
+			}
+			parentID = parent.ParentThreadID
+		}
+	}
 }

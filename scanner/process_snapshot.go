@@ -241,8 +241,13 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 		})
 	}
 	if isCodex {
+		parentPID, err := proc.PpidWithContext(ctx)
+		if err != nil {
+			parentPID = 0
+		}
 		s.codexProcs = append(s.codexProcs, CodexProcessInfo{
 			PID:        pid,
+			ParentPID:  int(parentPID),
 			CWD:        cleanCWD,
 			CreateTime: createTime,
 		})
