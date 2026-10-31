@@ -242,7 +242,8 @@ func TestRunReconcilesRestoredSessions(t *testing.T) {
 
 func createOpencodeFixture(t *testing.T, cfg Config) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+cfg.OpencodeDBPath+"?mode=rwc")
+	// Real OpenCode databases use WAL, where a reader never blocks the writer.
+	db, err := sql.Open("sqlite", "file:"+cfg.OpencodeDBPath+"?mode=rwc&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,3 +346,114 @@ func TestStartTimestamp(t *testing.T) {
 }
 
 var _ scanner.ProcessSnapshot = testSnapshot{}
+
+func TestRunStartAtEndSkipsHistoryAndFollowsNewOutput(t *testing.T) {
+	for _, harness := range []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex} {
+		t.Run(string(harness), func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Harnesses = []Harness{harness}
+			cfg.StartAtEnd = true
+			path, _ := transcriptFixture(t, cfg, harness)
+			events := make(chan Event, 64)
+			startTestWatcher(t, cfg, collectEvents(events))
+			awaitEvent(t, events, "run_started")
+			time.Sleep(3 * cfg.ScanInterval) // History would arrive by now.
+			select {
+			case event := <-events:
+				t.Fatalf("replayed history: %+v", event)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			line := liveTranscriptLine(harness)
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString(line + "\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			event := awaitEvent(t, events, liveTranscriptEvent(harness))
+			if event.SessionID != "session" {
+				t.Fatalf("event = %+v", event)
+			}
+		})
+	}
+}
+
+func liveTranscriptLine(harness Harness) string {
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	switch harness {
+	case HarnessPi:
+		return fmt.Sprintf(`{"type":"message","id":"later","timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":"later"}]}}`, stamp)
+	case HarnessCodex:
+		return fmt.Sprintf(`{"type":"event_msg","timestamp":%q,"payload":{"type":"task_complete","last_agent_message":"later"}}`, stamp)
+	default:
+		return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"later"}}`, stamp)
+	}
+}
+
+func liveTranscriptEvent(harness Harness) string {
+	if harness == HarnessCodex {
+		return "turn_end"
+	}
+	return "turn_start"
+}
+
+func TestRunStartAtEndReadsLaterSessionsFromTheStart(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Harnesses = []Harness{HarnessClaudeCode}
+	cfg.StartAtEnd = true
+	events := make(chan Event, 64)
+	startTestWatcher(t, cfg, collectEvents(events))
+	time.Sleep(3 * cfg.ScanInterval)
+
+	transcriptFixture(t, cfg, HarnessClaudeCode)
+
+	awaitEvent(t, events, "run_started")
+	awaitEvent(t, events, "turn_end")
+}
+
+func TestRunStartAtEndSkipsOpencodeHistory(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Harnesses = []Harness{HarnessOpencode}
+	cfg.StartAtEnd = true
+	db := createOpencodeFixture(t, cfg)
+	execTestSQL(t, db, `INSERT INTO message VALUES ('old','session',2,'{"role":"user"}')`)
+	execTestSQL(t, db, `INSERT INTO part VALUES ('old-prompt','old','session',2,'{"type":"text","text":"old"}')`)
+	events := make(chan Event, 64)
+	startTestWatcher(t, cfg, collectEvents(events))
+	awaitEvent(t, events, "run_started")
+
+	execTestSQL(t, db, `INSERT INTO message VALUES ('new','session',3,'{"role":"user"}')`)
+	execTestSQL(t, db, `INSERT INTO part VALUES ('new-prompt','new','session',3,'{"type":"text","text":"new"}')`)
+
+	event := awaitEvent(t, events, "user_prompt")
+	if event.Data.Content == nil || *event.Data.Content != "new" {
+		t.Fatalf("first prompt = %+v, want only the new one", event)
+	}
+}
+
+func TestRunSessionFilterLimitsSessions(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Harnesses = []Harness{HarnessClaudeCode}
+	var offered sync.Map
+	cfg.SessionFilter = func(s Session) bool {
+		offered.Store(s.SessionID, s.CWD)
+		return false
+	}
+	transcriptFixture(t, cfg, HarnessClaudeCode)
+	events := make(chan Event, 64)
+	startTestWatcher(t, cfg, collectEvents(events))
+	time.Sleep(3 * cfg.ScanInterval)
+	if _, seen := offered.Load("session"); !seen {
+		t.Fatal("the filter was not consulted")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("filtered session emitted %+v", event)
+	default:
+	}
+}

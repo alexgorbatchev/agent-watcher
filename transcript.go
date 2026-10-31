@@ -33,10 +33,13 @@ func (r *runner) attach(ctx context.Context, s session) {
 	}
 	tailCtx, cancel := context.WithCancel(ctx)
 	reader := &transcriptReader{runner: r, session: s}
-	options := tailer.WithWatcherRegistry(r.registry)
+	options := []tailer.TailerOption{tailer.WithWatcherRegistry(r.registry)}
+	if r.skipHistory {
+		options = append(options, tailer.WithStartAtEnd())
+	}
 	t, err := tailer.NewTailerWithOffsetHandler(s.path, r.cursors, func(line []byte, offset int64) error {
 		return reader.process(tailCtx, line, offset)
-	}, options)
+	}, options...)
 	if err != nil {
 		cancel()
 		r.logger.Warn("tailer_attach_failed", "path", s.path, "err", err)

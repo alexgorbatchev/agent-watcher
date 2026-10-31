@@ -45,11 +45,26 @@ func (r *runner) scan(ctx context.Context) {
 			r.logger.Warn("scan_failed", "harness", harness, "err", err)
 			continue
 		}
-		r.reconcile(ctx, harness, sessions)
+		r.reconcile(ctx, harness, r.filter(sessions))
 	}
+	r.skipHistory = false
 	if err := r.tracker.Save(); err != nil {
 		r.logger.Warn("session_tracker_save_error", "err", err)
 	}
+}
+
+func (r *runner) filter(sessions []session) []session {
+	if r.cfg.SessionFilter == nil {
+		return sessions
+	}
+	kept := sessions[:0]
+	for _, s := range sessions {
+		// An ended session stays: reconcile drains what it wrote before it exited.
+		if !s.active || r.cfg.SessionFilter(s.snapshot()) {
+			kept = append(kept, s)
+		}
+	}
+	return kept
 }
 
 func (r *runner) discover(ctx context.Context, harness Harness) ([]session, error) {

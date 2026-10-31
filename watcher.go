@@ -68,7 +68,14 @@ type Config struct {
 	CursorPruneInterval     time.Duration
 	CursorFlushInterval     time.Duration
 	ProcessSnapshotProvider scanner.ProcessSnapshotProvider
-	Logger                  *slog.Logger
+	// StartAtEnd skips what the sessions running when Run starts have already
+	// written, for a live view that must not replay their history. A transcript
+	// with a saved cursor resumes from it. Sessions that appear later are read from
+	// the start, so nothing they write is missed.
+	StartAtEnd bool
+	// SessionFilter limits Run to the sessions it returns true for. Nil keeps all.
+	SessionFilter func(Session) bool
+	Logger        *slog.Logger
 }
 
 type session struct {
@@ -105,6 +112,8 @@ type runner struct {
 	active      map[Harness]map[string]session
 	tails       map[string]*activeTail
 	subagents   map[string]map[string]bool
+	// skipHistory holds for the first scan of a StartAtEnd run.
+	skipHistory bool
 	wg          sync.WaitGroup
 }
 
@@ -158,7 +167,7 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 		cfg:       cfg, handler: handler, logger: logger, cursors: cursors,
 		tracker: tracker, registry: registry, checkpoints: checkpoints,
 		active: make(map[Harness]map[string]session), tails: make(map[string]*activeTail),
-		subagents: make(map[string]map[string]bool),
+		subagents: make(map[string]map[string]bool), skipHistory: cfg.StartAtEnd,
 	}
 	for id, tracked := range tracker.GetAll() {
 		if tracked.IsActive {

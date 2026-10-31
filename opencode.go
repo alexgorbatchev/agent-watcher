@@ -87,6 +87,10 @@ func (r *runner) emitDatabaseEvent(ctx context.Context, s session, parsed databa
 	if !emit {
 		return nil
 	}
+	if r.skipHistory {
+		ack()
+		return nil
+	}
 	event := s.Event
 	event.ParsedEvent = parsed.ParsedEvent
 	if err := r.handler(ctx, event, ack); err != nil {

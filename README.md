@@ -119,6 +119,8 @@ Explicit paths take precedence over environment-based defaults.
 | `CursorPruneInterval` | `1h` | Period between cursor pruning passes. |
 | `CursorFlushInterval` | `2s` | Period between transcript and database checkpoint flushes. |
 | `ProcessSnapshotProvider` | Live process discovery | Supply process snapshots for embedded applications or tests. |
+| `StartAtEnd` | `false` | Skip what the sessions running when `Run` starts have already written, so a live view does not replay their history. A saved cursor still wins, and sessions that appear later are read from the start. A session resumed after `Run` starts counts as new. |
+| `SessionFilter` | All sessions | Limit `Run` to the sessions this returns true for, such as those in one directory. Each concurrent `Run` still needs its own paths. |
 | `Logger` | `slog.Default()` | Receive structured logs with concise snake_case messages. |
 
 Nonpositive durations use their defaults. Missing harness storage produces no sessions.

@@ -40,9 +40,17 @@ type Tailer struct {
 	inode           uint64
 	device          uint64
 	generation      uint64
+	startAtEnd      bool
 }
 
 // NewTailer creates a tailer using the classic LineHandler (auto-commits read offsets to cursor store).
+// WithStartAtEnd starts a file with no cursor at its end, skipping what it holds.
+func WithStartAtEnd() TailerOption {
+	return func(t *Tailer) {
+		t.startAtEnd = true
+	}
+}
+
 func NewTailer(filePath string, store *CursorStore, onLine LineHandler, opts ...TailerOption) (*Tailer, error) {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -248,8 +256,13 @@ func (t *Tailer) readAvailable() error {
 				t.offset = c.Offset
 				t.committedOffset = c.Offset
 			}
+		} else if t.startAtEnd {
+			t.offset = fi.Size()
+			t.committedOffset = fi.Size()
 		}
 	}
+	// Only the first read skips history: a replaced file is new content.
+	t.startAtEnd = false
 
 	if t.offset > fi.Size() {
 		t.offset = 0

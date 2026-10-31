@@ -21,6 +21,8 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 
 - Read applicable skills before writing code; use Go 1.26.2+ conventions.
 - `watcher.Run` owns workers and joins them on cancellation. Handlers may run concurrently and must respect their context.
+- `Config.StartAtEnd` skips history only in the first scan, so sessions that appear later lose nothing. `Config.SessionFilter` drops active sessions before reconcile and keeps ended ones, which reconcile drains.
+- OpenCode test fixtures use WAL with a busy timeout, like real databases. A rollback journal lets a reader's lock fail the writer with `SQLITE_BUSY`.
 - `Snapshot` and `Snapshotter` share `discovery` with `Run` and never touch cursors, tailers, or the session tracker. Page actions and other one-shot callers use them, not `Run`.
 - `scanner/` discovers sessions with one shared process snapshot per tick; `tailer/` owns filesystem watches and byte cursors. Keep event parsing in `agent-parser`.
 - Transcript acknowledgement represents every event in one source line. Commit only a contiguous acknowledged prefix and bind callbacks to the file generation to reject acknowledgements from replaced files.
