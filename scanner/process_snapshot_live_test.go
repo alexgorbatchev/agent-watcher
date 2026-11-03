@@ -83,6 +83,23 @@ func TestCaptureProcessSnapshotLiveCandidates(t *testing.T) {
 					if foundCWD != cwd || created <= 0 || !snapshot.VerifyProcessMatch(cmd.Process.Pid, created) {
 						t.Fatalf("incorrect process pairing: cwd=%q created=%d", foundCWD, created)
 					}
+					filtered, err := CaptureFilteredProcessSnapshot(ctx, func(pid int) bool { return pid == cmd.Process.Pid })
+					if err != nil {
+						t.Fatal(err)
+					}
+					counts := map[string]int{"pi": len(filtered.PiProcesses()), "codex": len(filtered.CodexProcesses()), "opencode": len(filtered.OpencodeProcesses())}
+					for harness, count := range counts {
+						want := 0
+						if harness == tt.harness {
+							want = 1
+						}
+						if count != want {
+							t.Errorf("filtered %s candidates = %d, want %d", harness, count, want)
+						}
+					}
+					if !filtered.VerifyProcessMatch(cmd.Process.Pid, created) || filtered.IsProcessAlive(os.Getpid()) {
+						t.Fatal("filtered snapshot lost included process or retained excluded process")
+					}
 					return
 				}
 				select {

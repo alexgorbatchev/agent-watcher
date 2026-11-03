@@ -37,20 +37,25 @@ func parseComm(comm []byte) string {
 
 // captureProcessSnapshot queries all processes in a single bulk syscall on Darwin
 // using unix.SysctlKinfoProcSlice("kern.proc.all").
-func captureProcessSnapshot(ctx context.Context) (ProcessSnapshot, error) {
+func captureProcessSnapshot(ctx context.Context, include func(int) bool) (ProcessSnapshot, error) {
 	kprocs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return nil, fmt.Errorf("enumerating processes via sysctl: %w", err)
 	}
 
-	snap := &LiveProcessSnapshot{
-		processes: make(map[int]ProcessMeta, len(kprocs)),
-	}
+	return captureDarwinProcesses(ctx, kprocs, process.NewProcessWithContext, include)
+}
 
+func captureDarwinProcesses(ctx context.Context, kprocs []unix.KinfoProc, newProcess func(context.Context, int32) (*process.Process, error), include func(int) bool) (ProcessSnapshot, error) {
+	snap := newCaptureSnapshot(len(kprocs), include)
 	for i := range kprocs {
 		kp := &kprocs[i]
 		pid := int(kp.Proc.P_pid)
-		if pid <= 0 {
+		accepted, err := includeProcessPID(ctx, pid, include)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
 			continue
 		}
 
@@ -71,9 +76,12 @@ func captureProcessSnapshot(ctx context.Context) (ProcessSnapshot, error) {
 		}
 
 		snap.inspectCandidate(ctx, pid, name, createTime, func() (*process.Process, error) {
-			return process.NewProcessWithContext(ctx, int32(pid))
+			return newProcess(ctx, int32(pid))
 		})
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return snap, nil
 }

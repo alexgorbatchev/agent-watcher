@@ -264,7 +264,20 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 // CaptureProcessSnapshot walks the process table once using cheap filtering first,
 // populating process candidates for all supported harnesses.
 func CaptureProcessSnapshot(ctx context.Context) (ProcessSnapshot, error) {
-	return captureProcessSnapshot(ctx)
+	return CaptureFilteredProcessSnapshot(ctx, nil)
+}
+
+// CaptureFilteredProcessSnapshot captures only PIDs accepted by include. A nil
+// predicate includes every PID. The predicate runs synchronously before any
+// per-process metadata reads or agent classification; bulk OS enumeration still
+// covers the process table. Excluded PIDs are absent from all snapshot queries.
+// Cancellation returns an error instead of a partial snapshot. The predicate
+// must return promptly so capture can observe cancellation.
+func CaptureFilteredProcessSnapshot(ctx context.Context, include func(int) bool) (ProcessSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return captureProcessSnapshot(ctx, include)
 }
 
 // LiveProcessSnapshotProvider implements ProcessSnapshotProvider by calling CaptureProcessSnapshot.
