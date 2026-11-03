@@ -76,7 +76,7 @@ func TestParserDispatchForHarnessTypes(t *testing.T) {
 			"payload": {
 				"type": "token_count",
 				"info": { "total_token_usage": { "total_tokens": 100 } },
-				"rate_limits": { "remaining_tokens": 0, "reset_tokens": "45s" }
+				"rate_limits": { "primary": { "used_percent": 100, "window_minutes": 300, "resets_at": 1781280568 } }
 			}
 		}`)
 		_, err := parseLineForHarness(HarnessCodex, line1, "", nil, codexParser)

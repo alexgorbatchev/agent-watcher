@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexgorbatchev/agent-parser"
 	"github.com/shirou/gopsutil/v4/process"
 )
 
@@ -270,8 +271,11 @@ func (s *PiScanner) Scan(ctx context.Context) ([]PiSessionDescriptor, error) {
 				}
 				header = h
 
-				la, sErr := ExtractLastActiveTimestamp(filePath)
+				la, sErr := ExtractLastActiveTimestamp(ctx, filePath, parser.PiActivityTimestamp)
 				if sErr != nil {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
 					la = fileModTime
 				}
 				lastActive = la

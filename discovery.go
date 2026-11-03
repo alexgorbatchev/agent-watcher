@@ -101,8 +101,10 @@ func (d *discovery) discover(ctx context.Context, harness Harness) ([]session, e
 			}
 			s.Timestamp = startTimestamp(desc.StartedAt, 0)
 			if desc.TranscriptPath != "" {
-				if last, err := scanner.ExtractLastActiveTimestamp(desc.TranscriptPath); err == nil {
+				if last, err := scanner.ExtractLastActiveTimestamp(ctx, desc.TranscriptPath, parser.ClaudeCodeActivityTimestamp); err == nil {
 					s.Timestamp = startTimestamp(desc.StartedAt, last)
+				} else if err := ctx.Err(); err != nil {
+					return nil, err
 				}
 			}
 			sessions = append(sessions, s)
@@ -234,8 +236,11 @@ func (r *runner) attachSubagents(ctx context.Context, parent session) {
 		}
 		if !seen[sub.SubagentID] {
 			s.Timestamp = time.Now().UnixMilli()
-			if first, err := scanner.ExtractFirstActiveTimestamp(sub.TranscriptPath); err == nil && first > 0 && first < s.Timestamp {
+			if first, err := scanner.ExtractFirstActiveTimestamp(ctx, sub.TranscriptPath, parser.ClaudeCodeActivityTimestamp); err == nil && first > 0 && first < s.Timestamp {
 				s.Timestamp = first
+			}
+			if ctx.Err() != nil {
+				return
 			}
 			if s.startedAt > 0 && s.Timestamp < s.startedAt {
 				s.Timestamp = s.startedAt

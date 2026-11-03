@@ -336,8 +336,11 @@ func (s *CodexScanner) Scan(ctx context.Context) ([]CodexSessionDescriptor, erro
 			}
 			header = h
 
-			la, sErr := ExtractLastActiveTimestamp(path)
+			la, sErr := ExtractLastActiveTimestamp(ctx, path, parser.CodexActivityTimestamp)
 			if sErr != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				la = fileModTime
 			}
 			lastActive = la
