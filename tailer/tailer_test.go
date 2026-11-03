@@ -984,17 +984,17 @@ func TestWatcherRegistryUnit(t *testing.T) {
 		t.Errorf("expected 3 subscribers, got %d", reg.SubscriberCount())
 	}
 
-	// Test dispatch for relative path fallback
-	reg.dispatchEvent(filepath.Base(f1))
+	// Dispatch by the absolute path passed to the underlying watcher.
+	reg.dispatchEvent(f1)
 	select {
 	case <-sub1.Events():
 	case <-time.After(100 * time.Millisecond):
-		t.Errorf("expected sub1 to receive event on base name dispatch")
+		t.Errorf("expected sub1 to receive event on exact path dispatch")
 	}
 	select {
 	case <-sub1b.Events():
 	case <-time.After(100 * time.Millisecond):
-		t.Errorf("expected sub1b to receive event on base name dispatch")
+		t.Errorf("expected sub1b to receive event on exact path dispatch")
 	}
 
 	// Sub2 should not receive event for f1

@@ -158,7 +158,7 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 	if err != nil {
 		return fmt.Errorf("initializing session tracker: %w", err)
 	}
-	registry, err := tailer.NewWatcherRegistry()
+	registry, err := tailer.NewWatcherRegistry(tailer.WithWatcherLogger(logger))
 	if err != nil {
 		return fmt.Errorf("initializing watcher registry: %w", err)
 	}

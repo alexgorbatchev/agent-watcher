@@ -3,6 +3,7 @@ package tailer
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,20 @@ func WithWatcherRegistry(reg *WatcherRegistry) TailerOption {
 	}
 }
 
+// WatcherRegistryOption configures a WatcherRegistry.
+type WatcherRegistryOption func(*WatcherRegistry)
+
+// WithWatcherLogger sets the logger for filesystem watcher errors.
+// A nil logger uses slog.Default.
+func WithWatcherLogger(logger *slog.Logger) WatcherRegistryOption {
+	return func(r *WatcherRegistry) {
+		r.logger = logger
+		if r.logger == nil {
+			r.logger = slog.Default()
+		}
+	}
+}
+
 type fsWatcher interface {
 	Add(name string) error
 	Remove(name string) error
@@ -66,6 +81,7 @@ type WatcherRegistry struct {
 	watcher     fsWatcher
 	eventsCh    <-chan fsnotify.Event
 	errorsCh    <-chan error
+	logger      *slog.Logger
 	mu          sync.Mutex
 	dirs        map[string]int
 	files       map[string]int
@@ -106,24 +122,29 @@ func (s *Subscription) Close() {
 	})
 }
 
-// NewWatcherRegistry creates and starts a new WatcherRegistry.
-func NewWatcherRegistry() (*WatcherRegistry, error) {
+// NewWatcherRegistry creates and starts a new WatcherRegistry, logging errors to
+// slog.Default unless WithWatcherLogger supplies a logger.
+func NewWatcherRegistry(opts ...WatcherRegistryOption) (*WatcherRegistry, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("creating fsnotify watcher: %w", err)
 	}
 
-	return newWatcherRegistry(w, w.Events, w.Errors), nil
+	return newWatcherRegistry(w, w.Events, w.Errors, opts...), nil
 }
 
-func newWatcherRegistry(w fsWatcher, events <-chan fsnotify.Event, errors <-chan error) *WatcherRegistry {
+func newWatcherRegistry(w fsWatcher, events <-chan fsnotify.Event, errors <-chan error, opts ...WatcherRegistryOption) *WatcherRegistry {
 	r := &WatcherRegistry{
 		watcher:     w,
 		eventsCh:    events,
 		errorsCh:    errors,
+		logger:      slog.Default(),
 		dirs:        make(map[string]int),
 		files:       make(map[string]int),
 		subscribers: make(map[string]map[*Subscription]struct{}),
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 	r.wg.Add(1)
 	go r.loop()
@@ -143,10 +164,14 @@ func (r *WatcherRegistry) loop() {
 				cleanEventPath := filepath.Clean(event.Name)
 				r.dispatchEvent(cleanEventPath)
 			}
-		case _, ok := <-r.errorsCh:
+		case err, ok := <-r.errorsCh:
 			if !ok {
 				r.closeSubscriptions()
 				return
+			}
+			r.logger.Warn("watcher_error", "err", err)
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				r.dispatchOverflow()
 			}
 		}
 	}
@@ -154,17 +179,21 @@ func (r *WatcherRegistry) loop() {
 
 func (r *WatcherRegistry) closeSubscriptions() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, subs := range r.subscribers {
+	r.closed.Store(true)
+	subscribers := r.subscribers
+	r.subscribers = make(map[string]map[*Subscription]struct{})
+	r.dirs = make(map[string]int)
+	r.files = make(map[string]int)
+	r.mu.Unlock()
+	// Subscription.Close holds its once while detaching under r.mu. Finish
+	// subscriptions after releasing r.mu so concurrent shutdown cannot deadlock.
+	for _, subs := range subscribers {
 		for sub := range subs {
 			sub.once.Do(func() {
 				close(sub.doneCh)
 			})
 		}
 	}
-	r.subscribers = make(map[string]map[*Subscription]struct{})
-	r.dirs = make(map[string]int)
-	r.files = make(map[string]int)
 }
 
 // Close stops the registry, closes the underlying fsnotify watcher, and unregisters all subscribers.
@@ -283,32 +312,25 @@ func (r *WatcherRegistry) unsubscribe(s *Subscription) {
 
 func (r *WatcherRegistry) dispatchEvent(cleanEventPath string) {
 	r.mu.Lock()
-	subs := r.subscribers[cleanEventPath]
-	if len(subs) == 0 {
-		baseName := filepath.Base(cleanEventPath)
-		for subPath, fileSubs := range r.subscribers {
-			if filepath.Base(subPath) == baseName {
-				if filepath.Dir(cleanEventPath) == "." || filepath.Dir(cleanEventPath) == filepath.Dir(subPath) {
-					for sub := range fileSubs {
-						select {
-						case sub.notifyCh <- struct{}{}:
-						default:
-						}
-					}
-				}
-			}
-		}
-		r.mu.Unlock()
-		return
-	}
+	defer r.mu.Unlock()
+	wakeSubscribers(r.subscribers[cleanEventPath])
+}
 
+func (r *WatcherRegistry) dispatchOverflow() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, subs := range r.subscribers {
+		wakeSubscribers(subs)
+	}
+}
+
+func wakeSubscribers(subs map[*Subscription]struct{}) {
 	for sub := range subs {
 		select {
 		case sub.notifyCh <- struct{}{}:
 		default:
 		}
 	}
-	r.mu.Unlock()
 }
 
 // WatchList returns the list of paths actively watched by the underlying fsnotify watcher.
