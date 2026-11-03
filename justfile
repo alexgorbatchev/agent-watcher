@@ -14,7 +14,7 @@ vet:
 
 # Check formatting, module hygiene, vet and static analysis
 lint:
-    @out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "Unformatted Go files:"; echo "$out"; exit 1; fi
+    scripts/check-format.sh
     go mod tidy -diff
     go vet ./...
     golangci-lint run
