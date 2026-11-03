@@ -574,7 +574,10 @@ func TestLegacyMockEnvironmentDoesNotReviveDeadProcesses(t *testing.T) {
 
 func TestClaudeConfigDirRelocatesSessionsAndTranscripts(t *testing.T) {
 	home := t.TempDir()
-	configDir := t.TempDir()
+	configDir := filepath.Join(t.TempDir(), "config")
+	if err := os.Symlink(t.TempDir(), configDir); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 	t.Setenv("CLAUDE_SESSIONS_DIR", "")
@@ -595,12 +598,16 @@ func TestClaudeConfigDirRelocatesSessionsAndTranscripts(t *testing.T) {
 	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	resolved, err := filepath.EvalSymlinks(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	sessions, err := NewClaudeCodeScanner(nil).Scan()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0].SessionID != "relocated" || sessions[0].TranscriptPath != transcript {
+	if len(sessions) != 1 || sessions[0].SessionID != "relocated" || sessions[0].TranscriptPath != resolved {
 		t.Fatalf("sessions = %+v", sessions)
 	}
 

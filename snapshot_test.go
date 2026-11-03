@@ -18,7 +18,22 @@ func TestSnapshotListsLiveSessionsWithoutState(t *testing.T) {
 		t.Run(string(harness), func(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.Harnesses = []Harness{harness}
+			if harness == HarnessCodex {
+				cfg.CodexSessionsDir = filepath.Join(t.TempDir(), "sessions")
+				if err := os.Symlink(t.TempDir(), cfg.CodexSessionsDir); err != nil {
+					t.Fatal(err)
+				}
+			}
 			transcript, _ := transcriptFixture(t, cfg, harness)
+			if harness == HarnessCodex {
+				// Codex resolves its discovery root; preserve the original
+				// path expectations for the other harnesses.
+				resolved, err := filepath.EvalSymlinks(transcript)
+				if err != nil {
+					t.Fatal(err)
+				}
+				transcript = resolved
+			}
 
 			sessions, err := Snapshot(context.Background(), cfg)
 			if err != nil {
