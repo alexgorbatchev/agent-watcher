@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: Check formatting
+        run: scripts/check-format.sh
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
