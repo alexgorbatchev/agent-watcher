@@ -232,10 +232,6 @@ func TestTailerFileTruncationAndHandlerError(t *testing.T) {
 }
 
 func TestTailerStartStopMethod(t *testing.T) {
-	origInterval := tailerPollInterval
-	tailerPollInterval = 20 * time.Millisecond
-	defer func() { tailerPollInterval = origInterval }()
-
 	tmpDir := t.TempDir()
 	store, _ := NewCursorStore(filepath.Join(tmpDir, "cursors.json"))
 	targetFile := filepath.Join(tmpDir, "stop.jsonl")
@@ -252,6 +248,7 @@ func TestTailerStartStopMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tail.pollInterval = 20 * time.Millisecond
 
 	doneCh := make(chan error, 1)
 	go func() {

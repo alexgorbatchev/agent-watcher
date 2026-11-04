@@ -13,7 +13,8 @@ import (
 	"time"
 )
 
-var tailerPollInterval = 10 * time.Second
+// defaultTailerPollInterval bounds how long a tailer waits for a missed file event.
+const defaultTailerPollInterval = 10 * time.Second
 
 type LineHandler func(line []byte) error
 
@@ -26,6 +27,7 @@ type Tailer struct {
 	onOffset LineOffsetHandler
 
 	registry        *WatcherRegistry
+	pollInterval    time.Duration
 	stopCh          chan struct{}
 	once            sync.Once
 	wakeCount       int64
@@ -58,11 +60,12 @@ func NewTailer(filePath string, store *CursorStore, onLine LineHandler, opts ...
 	}
 
 	t := &Tailer{
-		filePath:   absPath,
-		store:      store,
-		onLine:     onLine,
-		stopCh:     make(chan struct{}),
-		autoCommit: true,
+		filePath:     absPath,
+		store:        store,
+		onLine:       onLine,
+		stopCh:       make(chan struct{}),
+		pollInterval: defaultTailerPollInterval,
+		autoCommit:   true,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -85,11 +88,12 @@ func NewTailerWithOffsetHandler(filePath string, store *CursorStore, onOffset Li
 	}
 
 	t := &Tailer{
-		filePath:   absPath,
-		store:      store,
-		onOffset:   onOffset,
-		stopCh:     make(chan struct{}),
-		autoCommit: false,
+		filePath:     absPath,
+		store:        store,
+		onOffset:     onOffset,
+		stopCh:       make(chan struct{}),
+		pollInterval: defaultTailerPollInterval,
+		autoCommit:   false,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -114,7 +118,7 @@ func (t *Tailer) Start(ctx context.Context) error {
 	// Initial read
 	_ = t.readAvailable()
 
-	ticker := time.NewTicker(tailerPollInterval)
+	ticker := time.NewTicker(t.pollInterval)
 	defer ticker.Stop()
 
 	for {
