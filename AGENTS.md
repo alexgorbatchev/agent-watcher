@@ -45,10 +45,10 @@ Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parse
 - Always: automatically record new user instructions in the appropriate `AGENTS.md`, checking conflicts with the user.
 - Always: functional code changes require behavioral test changes, red/green verification, and >=90% statement coverage per package. Temporarily disable the change and verify its regression test fails before completing work.
 - Always: keep the full watching pipeline reusable; do not import `agent-status` or add application telemetry/transport contracts.
-- Always: publish the extracted library through GitHub and integrate tagged versions into `agent-status`; initial publication is authorized by the user, and future releases require explicit authorization.
+- Always: publish the extracted library through GitHub and integrate tagged versions into `agent-status`. Cut tagged releases whenever consumers need landed changes; no separate authorization is required.
 - Always: use `rg` or codegraph; keep scratch files under `.tmp`; never use heredocs.
 - Ask first: changing existing transcript cursor storage or application wire protocols.
-- Never: write to, lock, mutate, or delete harness logs or databases; parse or transmit credentials; publish releases without explicit authorization.
+- Never: write to, lock, mutate, or delete harness logs or databases; parse or transmit credentials.
 - Never: modify or stage unrelated concurrent changes.
 
 ## References
