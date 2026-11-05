@@ -6,7 +6,7 @@ default:
 
 # Run all unit tests with race detector and coverage
 test *args:
-    scripts/check-coverage.sh -race -coverprofile=coverage.out {{ if args == "" { "./..." } else { args } }}
+    scripts/check-coverage.sh -race -cover {{ if args == "" { "./..." } else { args } }}
 
 # Run static code analysis
 vet:
@@ -30,9 +30,9 @@ tidy:
 # Run static analysis and test suite in sequence
 check: lint test
 
-# Clean temporary and test artifacts
+# Clean build and coverage artifacts
 clean:
-    rm -rf bin dist coverage.out .tmp
+    rm -rf bin dist coverage.out
 
 # Download project dependencies for local development
 setup:

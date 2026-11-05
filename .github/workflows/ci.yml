@@ -27,6 +27,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - uses: extractions/setup-just@v4
+
       - name: Check module hygiene
         run: go mod tidy -diff
 
@@ -37,7 +39,7 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: scripts/check-coverage.sh -race -coverprofile=coverage.out ./...
+        run: just test
 
   lint:
     runs-on: ubuntu-latest
