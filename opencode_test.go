@@ -23,7 +23,7 @@ func TestOpencodeAcknowledgementControlsRestartReplay(t *testing.T) {
 				}
 				return collectEvents(events)(ctx, event, ack)
 			})
-			awaitEvent(t, events, "user_prompt")
+			awaitEvent(t, events, "turn_start")
 			stop()
 			if acknowledged {
 				execTestSQL(t, db, `INSERT INTO message VALUES ('next','session',3,'{"role":"user"}')`)
@@ -31,7 +31,7 @@ func TestOpencodeAcknowledgementControlsRestartReplay(t *testing.T) {
 			}
 			replayed := make(chan Event, 32)
 			stop = startTestWatcher(t, cfg, collectEvents(replayed))
-			event := awaitEvent(t, replayed, "user_prompt")
+			event := awaitEvent(t, replayed, "turn_start")
 			stop()
 			want := "hello"
 			if acknowledged {
@@ -52,7 +52,7 @@ func TestOpencodeStreamingToolAndUsage(t *testing.T) {
 	execTestSQL(t, db, `INSERT INTO part VALUES ('tool','assistant','session',3,'{"type":"tool","tool":"bash","callID":"call","state":{"status":"running","input":{"command":"pwd"}}}')`)
 	events := make(chan Event, 64)
 	stop := startTestWatcher(t, cfg, collectEvents(events))
-	awaitEvent(t, events, "tool_use")
+	awaitEvent(t, events, "tool_call")
 	execTestSQL(t, db, `UPDATE part SET data='{"type":"tool","tool":"bash","callID":"call","state":{"status":"completed","input":{"command":"pwd"},"output":"workspace"}}' WHERE id='tool'`)
 	result := awaitEvent(t, events, "tool_result")
 	if result.Data.ToolOutput == nil || *result.Data.ToolOutput != "workspace" {
@@ -69,7 +69,7 @@ func TestOpencodeStreamingToolAndUsage(t *testing.T) {
 	awaitEvent(t, events, "turn_end")
 	execTestSQL(t, db, `UPDATE message SET data='{"role":"assistant","time":{"created":3,"completed":5},"finish":"stop","tokens":{"input":10,"output":3,"total":13,"cache":{"read":0,"write":0}}}' WHERE id='assistant'`)
 	execTestSQL(t, db, `INSERT INTO part VALUES ('new','assistant','session',6,'{"type":"text","text":"after completion"}')`)
-	awaitEvent(t, events, "text")
+	awaitEvent(t, events, "agent_message")
 	stop()
 	for len(events) > 0 {
 		if event := <-events; event.EventType == "turn_end" {

@@ -15,6 +15,7 @@ type discovery struct {
 	pi       *scanner.PiScanner
 	codex    *scanner.CodexScanner
 	opencode *scanner.OpencodeScanner
+	agy      *scanner.AgyScanner
 }
 
 func newDiscovery(cfg Config) *discovery {
@@ -23,6 +24,7 @@ func newDiscovery(cfg Config) *discovery {
 		pi:       scanner.NewPiScanner(cfg.PiSessionsDir, nil),
 		codex:    scanner.NewCodexScanner(cfg.CodexSessionsDir, nil),
 		opencode: scanner.NewOpencodeScanner(cfg.OpencodeDBPath, nil),
+		agy:      scanner.NewAgyScanner(cfg.AgySessionsDir, nil),
 	}
 	d.claude.SetProjectsDir(cfg.ClaudeProjectsDir)
 	return d
@@ -35,6 +37,7 @@ func (d *discovery) startTick(provider scanner.ProcessSnapshotProvider) {
 	d.pi.SetProcessSnapshotProvider(tick)
 	d.codex.SetProcessSnapshotProvider(tick)
 	d.opencode.SetProcessSnapshotProvider(tick)
+	d.agy.SetProcessSnapshotProvider(tick)
 }
 
 func (r *runner) scan(ctx context.Context) {
@@ -147,6 +150,25 @@ func (d *discovery) discover(ctx context.Context, harness Harness) ([]session, e
 					Timestamp: startTimestamp(desc.StartedAt, 0)}},
 				startedAt: desc.StartedAt, active: desc.IsActive, name: desc.Title, lastActive: desc.UpdatedAt}
 			if desc.IsSubagent && desc.ParentID != "" {
+				s.SubagentID = &desc.SessionID
+			}
+			if desc.Title != "" {
+				s.Data.Title = &desc.Title
+			}
+			sessions = append(sessions, s)
+		}
+	case HarnessAgy:
+		found, err := d.agy.Scan(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, desc := range found {
+			s := session{Event: Event{Harness: harness, HarnessVersion: desc.HarnessVersion,
+				SessionID: desc.SessionID, PID: desc.PID, ParsedEvent: parser.ParsedEvent{CWD: desc.CWD,
+					Timestamp: startTimestamp(desc.StartedAt, desc.LastActive)}},
+				path: desc.TranscriptPath, startedAt: desc.StartedAt, active: desc.IsActive,
+				name: desc.Title, state: desc.State, stateUpdatedAt: desc.StateUpdatedAt}
+			if desc.IsSubagent && desc.ParentSessionID != "" {
 				s.SubagentID = &desc.SessionID
 			}
 			if desc.Title != "" {

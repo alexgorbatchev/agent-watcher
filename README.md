@@ -105,7 +105,7 @@ Explicit paths take precedence over environment-based defaults.
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `Harnesses` | All four harnesses | Select `HarnessClaudeCode`, `HarnessPi`, `HarnessCodex`, or `HarnessOpencode`. |
+| `Harnesses` | All five harnesses | Select `HarnessClaudeCode`, `HarnessPi`, `HarnessCodex`, `HarnessOpencode`, or `HarnessAgy`. |
 | `ScanInterval` | `2s` | Discovery and database polling interval. |
 | `ClaudeSessionsDirs` | Harness defaults | `$CLAUDE_SESSIONS_DIR`, ai-registry session storage under `$XDG_DATA_HOME` or `~/.local/share`, `$CLAUDE_CONFIG_DIR/sessions`, and `~/.claude/sessions`. |
 | `ClaudeProjectsDir` | Harness defaults | Transcript lookup checks `$CLAUDE_PROJECTS_DIR`, ai-registry project storage, `$CLAUDE_CONFIG_DIR/projects`, and `~/.claude/projects`. |

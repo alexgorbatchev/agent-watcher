@@ -33,6 +33,9 @@ func (s testSnapshot) CodexProcesses() []scanner.CodexProcessInfo {
 func (s testSnapshot) OpencodeProcesses() []scanner.OpencodeProcessInfo {
 	return []scanner.OpencodeProcessInfo{{PID: os.Getpid(), CWD: s.cwd}}
 }
+func (s testSnapshot) AgyProcesses() []scanner.AgyProcessInfo {
+	return []scanner.AgyProcessInfo{{PID: os.Getpid(), CWD: s.cwd}}
+}
 func (s testSnapshot) Process(pid int) (scanner.ProcessMeta, bool) {
 	return scanner.ProcessMeta{PID: pid, Alive: s.IsProcessAlive(pid)}, s.IsProcessAlive(pid)
 }
@@ -44,8 +47,8 @@ func testConfig(t *testing.T) Config {
 		ClaudeSessionsDirs: []string{filepath.Join(dir, "claude")},
 		ClaudeProjectsDir:  filepath.Join(dir, "projects"),
 		PiSessionsDir:      filepath.Join(dir, "pi"), CodexSessionsDir: filepath.Join(dir, "codex"),
-		OpencodeDBPath: filepath.Join(dir, "opencode.db"),
-		CursorPath:     filepath.Join(dir, "cursors.json"), SessionStatePath: filepath.Join(dir, "sessions.json"),
+		OpencodeDBPath: filepath.Join(dir, "opencode.db"), AgySessionsDir: filepath.Join(dir, "agy"),
+		CursorPath: filepath.Join(dir, "cursors.json"), SessionStatePath: filepath.Join(dir, "sessions.json"),
 		ScanInterval: 10 * time.Millisecond, CursorFlushInterval: 5 * time.Millisecond,
 		CursorPruneInterval: 5 * time.Millisecond,
 		ProcessSnapshotProvider: scanner.ProcessSnapshotProviderFunc(func(context.Context) (scanner.ProcessSnapshot, error) {
@@ -142,13 +145,20 @@ func transcriptFixture(t *testing.T, cfg Config, harness Harness) (string, strin
 		discoveryPath = path
 		content = fmt.Sprintf(`{"type":"session_meta","timestamp":%q,"payload":{"id":"session","cwd":%q,"timestamp":%q,"cli_version":"1.2"}}`, stamp, cwd, stamp) + "\n" +
 			fmt.Sprintf(`{"type":"event_msg","timestamp":%q,"payload":{"type":"task_complete","last_agent_message":"done"}}`, stamp) + "\n"
+	case HarnessAgy:
+		path = filepath.Join(cfg.AgySessionsDir, "session", ".system_generated", "logs", "transcript_full.jsonl")
+		discoveryPath = path
+		metaBytes, _ := json.Marshal(map[string]string{"cwd": cwd})
+		writeTestFile(t, filepath.Join(filepath.Dir(cfg.AgySessionsDir), "conversations", "session.meta"), string(metaBytes))
+		content = fmt.Sprintf(`{"step_index":0,"type":"USER_INPUT","created_at":%q,"content":"hello"}`, stamp) + "\n" +
+			fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":%q,"content":"done","finish_reason":"STOP"}`, stamp) + "\n"
 	}
 	writeTestFile(t, path, content)
 	return path, discoveryPath
 }
 
 func TestRunStreamsTranscriptsAndLifecycle(t *testing.T) {
-	for _, harness := range []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex} {
+	for _, harness := range []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessAgy} {
 		t.Run(string(harness), func(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.Harnesses = []Harness{harness}
@@ -291,7 +301,7 @@ func TestRunWatchesOpencodeMessages(t *testing.T) {
 	if start.Data.Title == nil || *start.Data.Title != "Task" {
 		t.Fatalf("missing title: %+v", start)
 	}
-	awaitEvent(t, events, "user_prompt")
+	awaitEvent(t, events, "turn_start")
 	awaitEvent(t, events, "thinking")
 	execTestSQL(t, db, `UPDATE part SET data='{"type":"reasoning","text":"working harder"}' WHERE id='thought'`)
 	changed := awaitEvent(t, events, "thinking")
@@ -349,7 +359,7 @@ func TestStartTimestamp(t *testing.T) {
 var _ scanner.ProcessSnapshot = testSnapshot{}
 
 func TestRunStartAtEndSkipsHistoryAndFollowsNewOutput(t *testing.T) {
-	for _, harness := range []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex} {
+	for _, harness := range []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessAgy} {
 		t.Run(string(harness), func(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.Harnesses = []Harness{harness}
@@ -391,6 +401,8 @@ func liveTranscriptLine(harness Harness) string {
 		return fmt.Sprintf(`{"type":"message","id":"later","timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":"later"}]}}`, stamp)
 	case HarnessCodex:
 		return fmt.Sprintf(`{"type":"event_msg","timestamp":%q,"payload":{"type":"task_complete","last_agent_message":"later"}}`, stamp)
+	case HarnessAgy:
+		return fmt.Sprintf(`{"step_index":2,"type":"USER_INPUT","created_at":%q,"content":"later"}`, stamp)
 	default:
 		return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"later"}}`, stamp)
 	}
@@ -443,7 +455,7 @@ func TestRunStartAtEndSkipsOpencodeHistory(t *testing.T) {
 	execTestSQL(t, db, `INSERT INTO message VALUES ('new','session',3,'{"role":"user"}')`)
 	execTestSQL(t, db, `INSERT INTO part VALUES ('new-prompt','new','session',3,'{"type":"text","text":"new"}')`)
 
-	event := awaitEvent(t, events, "user_prompt")
+	event := awaitEvent(t, events, "turn_start")
 	if event.Data.Content == nil || *event.Data.Content != "new" {
 		t.Fatalf("first prompt = %+v, want only the new one", event)
 	}

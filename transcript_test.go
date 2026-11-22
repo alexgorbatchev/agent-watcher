@@ -35,6 +35,12 @@ func TestParserDispatchForHarnessTypes(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "agy valid line",
+			harness: HarnessAgy,
+			line:    []byte(`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-22T14:38:26Z","content":"hello"}`),
+			wantErr: false,
+		},
+		{
 			name:        "opencode in line tailer returns error",
 			harness:     HarnessOpencode,
 			line:        []byte(`{}`),
@@ -52,7 +58,7 @@ func TestParserDispatchForHarnessTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			events, pErr := parseLineForHarness(tt.harness, tt.line, tt.cwd, nil, nil)
+			events, pErr := parseLineForHarness(tt.harness, tt.line, tt.cwd, nil, nil, nil)
 
 			if (pErr != nil) != tt.wantErr {
 				t.Fatalf("parseLineForHarness(%v) error = %v, wantErr %v", tt.harness, pErr, tt.wantErr)
@@ -79,7 +85,7 @@ func TestParserDispatchForHarnessTypes(t *testing.T) {
 				"rate_limits": { "primary": { "used_percent": 100, "window_minutes": 300, "resets_at": 1781280568 } }
 			}
 		}`)
-		_, err := parseLineForHarness(HarnessCodex, line1, "", nil, codexParser)
+		_, err := parseLineForHarness(HarnessCodex, line1, "", nil, codexParser, nil)
 		if err != nil {
 			t.Fatalf("unexpected error line 1: %v", err)
 		}
@@ -93,7 +99,7 @@ func TestParserDispatchForHarnessTypes(t *testing.T) {
 				"codex_error_info": "RateLimitExceeded"
 			}
 		}`)
-		evs, err := parseLineForHarness(HarnessCodex, line2, "", nil, codexParser)
+		evs, err := parseLineForHarness(HarnessCodex, line2, "", nil, codexParser, nil)
 		if err != nil {
 			t.Fatalf("unexpected error line 2: %v", err)
 		}

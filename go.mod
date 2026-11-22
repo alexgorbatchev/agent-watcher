@@ -3,7 +3,7 @@ module github.com/alexgorbatchev/agent-watcher
 go 1.26.2
 
 require (
-	github.com/alexgorbatchev/agent-parser v1.1.0
+	github.com/alexgorbatchev/agent-parser v1.2.2-0.20261122150059-4253450b0afa
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/shirou/gopsutil/v4 v4.26.8
 	golang.org/x/sys v0.49.0
@@ -27,4 +27,5 @@ require (
 	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
+	mvdan.cc/sh/v3 v3.14.1 // indirect
 )

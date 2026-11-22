@@ -25,6 +25,7 @@ type ProcessSnapshot interface {
 	PiProcesses() []PiProcessInfo
 	CodexProcesses() []CodexProcessInfo
 	OpencodeProcesses() []OpencodeProcessInfo
+	AgyProcesses() []AgyProcessInfo
 	Process(pid int) (ProcessMeta, bool)
 }
 
@@ -71,6 +72,7 @@ type LiveProcessSnapshot struct {
 	piProcs       []PiProcessInfo
 	codexProcs    []CodexProcessInfo
 	opencodeProcs []OpencodeProcessInfo
+	agyProcs      []AgyProcessInfo
 }
 
 func (s *LiveProcessSnapshot) IsProcessAlive(pid int) bool {
@@ -124,13 +126,17 @@ func (s *LiveProcessSnapshot) OpencodeProcesses() []OpencodeProcessInfo {
 	return s.opencodeProcs
 }
 
+func (s *LiveProcessSnapshot) AgyProcesses() []AgyProcessInfo {
+	return s.agyProcs
+}
+
 // isPlausibleAgentProc performs cheap filtering on process name before inspecting cmdline.
 func isPlausibleAgentProc(name string) bool {
 	base := strings.ToLower(filepath.Base(name))
 	base = strings.TrimSuffix(base, ".exe")
 
 	switch base {
-	case "pi", "codex", "codex-tui", "codex-cli", "opencode", "claude":
+	case "pi", "codex", "codex-tui", "codex-cli", "opencode", "claude", "agy":
 		return true
 	}
 
@@ -178,6 +184,7 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 	isPi := baseName == "pi"
 	isCodex := baseName == "codex" || baseName == "codex-tui" || baseName == "codex-cli"
 	isOpencode := baseName == "opencode"
+	isAgy := baseName == "agy"
 
 	var p *process.Process
 	getProc := func() (*process.Process, error) {
@@ -189,7 +196,7 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 		return p, err
 	}
 
-	if !isPi && !isCodex && !isOpencode {
+	if !isPi && !isCodex && !isOpencode && !isAgy {
 		if !isAgentInterpreter(baseName) {
 			return
 		}
@@ -215,10 +222,13 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 			if baseArg == "opencode" || strings.HasSuffix(arg, "/opencode") {
 				isOpencode = true
 			}
+			if baseArg == "agy" || strings.HasSuffix(arg, "/agy") {
+				isAgy = true
+			}
 		}
 	}
 
-	if !isPi && !isCodex && !isOpencode {
+	if !isPi && !isCodex && !isOpencode && !isAgy {
 		return
 	}
 
@@ -254,6 +264,13 @@ func (s *LiveProcessSnapshot) inspectCandidate(
 	}
 	if isOpencode {
 		s.opencodeProcs = append(s.opencodeProcs, OpencodeProcessInfo{
+			PID:        pid,
+			CWD:        cleanCWD,
+			CreateTime: createTime,
+		})
+	}
+	if isAgy {
+		s.agyProcs = append(s.agyProcs, AgyProcessInfo{
 			PID:        pid,
 			CWD:        cleanCWD,
 			CreateTime: createTime,
@@ -321,5 +338,16 @@ func SnapshotOpencodeProcessFinder(provider ProcessSnapshotProvider) OpencodePro
 			return nil, err
 		}
 		return snap.OpencodeProcesses(), nil
+	}
+}
+
+// SnapshotAgyProcessFinder returns an AgyProcessFinder backed by a ProcessSnapshotProvider.
+func SnapshotAgyProcessFinder(provider ProcessSnapshotProvider) AgyProcessFinder {
+	return func(ctx context.Context) ([]AgyProcessInfo, error) {
+		snap, err := provider.GetSnapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return snap.AgyProcesses(), nil
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/alexgorbatchev/agent-watcher/tailer"
 )
 
-func parseLineForHarness(harness Harness, line []byte, cwd string, ccParser *parser.ClaudeCodeParser, codexParser *parser.CodexParser) ([]parser.ParsedEvent, error) {
+func parseLineForHarness(harness Harness, line []byte, cwd string, ccParser *parser.ClaudeCodeParser, codexParser *parser.CodexParser, agyParser *parser.AgyParser) ([]parser.ParsedEvent, error) {
 	switch harness {
 	case HarnessClaudeCode:
 		if ccParser == nil {
@@ -22,6 +22,11 @@ func parseLineForHarness(harness Harness, line []byte, cwd string, ccParser *par
 			codexParser = parser.NewCodexParser()
 		}
 		return codexParser.ParseLine(line)
+	case HarnessAgy:
+		if agyParser == nil {
+			agyParser = parser.NewAgyParser()
+		}
+		return agyParser.ParseLine(line)
 	default:
 		return nil, fmt.Errorf("unsupported harness type: %q", harness)
 	}
@@ -70,17 +75,18 @@ type transcriptReader struct {
 	generation uint64
 	claude     *parser.ClaudeCodeParser
 	codex      *parser.CodexParser
+	agy        *parser.AgyParser
 }
 
 func (r *transcriptReader) process(ctx context.Context, line []byte, offset int64) error {
 	generation, commit := r.tailer.Checkpoint(offset)
 	if r.batch == nil || r.batch.offset != offset || r.batch.generation != generation {
 		if r.generation != generation {
-			r.claude, r.codex = parser.NewClaudeCodeParser(), parser.NewCodexParser()
+			r.claude, r.codex, r.agy = parser.NewClaudeCodeParser(), parser.NewCodexParser(), parser.NewAgyParser()
 			r.generation = generation
 		}
 		batch := &transcriptBatch{offset: offset, generation: generation, acknowledge: r.queue.add(generation, commit)}
-		parsed, err := parseLineForHarness(r.session.Harness, line, r.session.CWD, r.claude, r.codex)
+		parsed, err := parseLineForHarness(r.session.Harness, line, r.session.CWD, r.claude, r.codex, r.agy)
 		if err != nil {
 			r.runner.logger.Warn("transcript_line_parse_failed", "harness", r.session.Harness, "path", r.session.path, "err", err)
 			return batch.acknowledge()

@@ -22,6 +22,7 @@ const (
 	HarnessPi              Harness = "pi"
 	HarnessCodex           Harness = "codex"
 	HarnessOpencode        Harness = "opencode"
+	HarnessAgy             Harness = "agy"
 	defaultScanInterval            = 2 * time.Second
 	defaultCursorRetention         = 24 * time.Hour
 	defaultPruneInterval           = time.Hour
@@ -60,6 +61,7 @@ type Config struct {
 	PiSessionsDir      string
 	CodexSessionsDir   string
 	OpencodeDBPath     string
+	AgySessionsDir     string
 	CursorPath         string
 	// OpencodeCheckpointPath defaults to the resolved CursorPath + ".opencode".
 	OpencodeCheckpointPath  string
@@ -206,11 +208,11 @@ func Run(ctx context.Context, cfg Config, handler Handler) error {
 // withDiscoveryDefaults validates the fields discovery reads and fills in their defaults.
 func (cfg Config) withDiscoveryDefaults() (Config, error) {
 	if len(cfg.Harnesses) == 0 {
-		cfg.Harnesses = []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode}
+		cfg.Harnesses = []Harness{HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode, HarnessAgy}
 	}
 	for _, harness := range cfg.Harnesses {
 		switch harness {
-		case HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode:
+		case HarnessClaudeCode, HarnessPi, HarnessCodex, HarnessOpencode, HarnessAgy:
 		default:
 			return cfg, fmt.Errorf("unsupported harness: %q", harness)
 		}

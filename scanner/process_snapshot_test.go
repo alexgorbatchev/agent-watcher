@@ -26,6 +26,9 @@ func TestIsPlausibleAgentProc(t *testing.T) {
 		{"codex-cli", "codex-cli", true},
 		{"opencode binary", "opencode", true},
 		{"opencode exe", "opencode.exe", true},
+		{"agy binary", "agy", true},
+		{"agy exe", "agy.exe", true},
+		{"agy path", "/usr/local/bin/agy", true},
 		{"claude binary", "claude", true},
 		{"node runtime", "node", true},
 		{"node20", "node20", true},
@@ -82,6 +85,10 @@ func (s *testDummySnapshot) CodexProcesses() []CodexProcessInfo {
 
 func (s *testDummySnapshot) OpencodeProcesses() []OpencodeProcessInfo {
 	return []OpencodeProcessInfo{{PID: 103, CWD: "/opencode"}}
+}
+
+func (s *testDummySnapshot) AgyProcesses() []AgyProcessInfo {
+	return []AgyProcessInfo{{PID: 104, CWD: "/agy"}}
 }
 
 func TestTickProcessSnapshotProvider(t *testing.T) {
@@ -188,6 +195,9 @@ func TestLiveProcessSnapshot(t *testing.T) {
 		opencodeProcs: []OpencodeProcessInfo{
 			{PID: 5003, CWD: "/opencode/repo", CreateTime: now},
 		},
+		agyProcs: []AgyProcessInfo{
+			{PID: 5004, CWD: "/agy/repo", CreateTime: now},
+		},
 	}
 
 	t.Run("IsProcessAlive", func(t *testing.T) {
@@ -261,6 +271,9 @@ func TestLiveProcessSnapshot(t *testing.T) {
 		if len(snap.OpencodeProcesses()) != 1 || snap.OpencodeProcesses()[0].PID != 5003 {
 			t.Errorf("OpencodeProcesses mismatch: %+v", snap.OpencodeProcesses())
 		}
+		if len(snap.AgyProcesses()) != 1 || snap.AgyProcesses()[0].PID != 5004 {
+			t.Errorf("AgyProcesses mismatch: %+v", snap.AgyProcesses())
+		}
 	})
 
 	t.Run("Process method", func(t *testing.T) {
@@ -332,6 +345,20 @@ func TestSnapshotProcessFinders(t *testing.T) {
 			t.Errorf("expected error from SnapshotOpencodeProcessFinder")
 		}
 	})
+
+	t.Run("SnapshotAgyProcessFinder", func(t *testing.T) {
+		finder := SnapshotAgyProcessFinder(okProvider)
+		procs, err := finder(context.Background())
+		if err != nil || len(procs) != 1 || procs[0].PID != 104 {
+			t.Errorf("SnapshotAgyProcessFinder got procs=%+v, err=%v", procs, err)
+		}
+
+		errFinder := SnapshotAgyProcessFinder(errProvider)
+		_, err = errFinder(context.Background())
+		if err == nil {
+			t.Errorf("expected error from SnapshotAgyProcessFinder")
+		}
+	})
 }
 
 func TestCaptureProcessSnapshot(t *testing.T) {
@@ -397,6 +424,17 @@ func TestInspectCandidate_Filtering(t *testing.T) {
 		})
 		if len(snap.piProcs) != 0 {
 			t.Errorf("expected 0 piProcs when proc getter fails")
+		}
+	})
+
+	t.Run("agy binary resolves live cwd via procGetter", func(t *testing.T) {
+		snap := &LiveProcessSnapshot{}
+		currentPID := os.Getpid()
+		snap.inspectCandidate(ctx, currentPID, "agy", 1000, func() (*process.Process, error) {
+			return process.NewProcess(int32(currentPID))
+		})
+		if len(snap.agyProcs) != 1 || snap.agyProcs[0].PID != currentPID || snap.agyProcs[0].CWD == "" {
+			t.Errorf("expected 1 agyProc for current pid, got %+v", snap.agyProcs)
 		}
 	})
 }
