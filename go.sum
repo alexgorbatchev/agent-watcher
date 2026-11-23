@@ -1,5 +1,5 @@
-github.com/alexgorbatchev/agent-parser v1.2.2-0.20261122150059-4253450b0afa h1:vozbofUKg3yPKzLv+3NySX9HyDZnigqDBJZ5KXBSJc0=
-github.com/alexgorbatchev/agent-parser v1.2.2-0.20261122150059-4253450b0afa/go.mod h1:keMIPxdiIWuuLs9+QMNIhh6YEhSvUL/ZJJIUnZ0w5+Y=
+github.com/alexgorbatchev/agent-parser v1.3.0 h1:1fXYgGVuuYjWAN2SCgH7sBHlQb7eIy9QU3LThsCwzis=
+github.com/alexgorbatchev/agent-parser v1.3.0/go.mod h1:keMIPxdiIWuuLs9+QMNIhh6YEhSvUL/ZJJIUnZ0w5+Y=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.1.0 h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg=
