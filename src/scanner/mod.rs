@@ -3,6 +3,7 @@ mod claude;
 mod opencode;
 mod paths;
 mod process;
+mod state;
 mod timestamps;
 mod tracker;
 mod transcripts;
@@ -11,6 +12,7 @@ pub use opencode::*;
 pub use paths::*;
 pub use process::*;
 use serde::{Deserialize, Serialize};
+pub use state::*;
 use std::{io, path::PathBuf};
 pub use timestamps::{extract_first_timestamp, extract_last_active_timestamp};
 use tokio_util::sync::CancellationToken;
@@ -39,6 +41,10 @@ pub struct SessionDescriptor {
     pub name: String,
     pub name_source: String,
     pub status: String,
+    pub status_updated_at: i64,
+    pub entrypoint: String,
+    pub state: SessionState,
+    pub state_updated_at: i64,
 }
 
 fn check_cancel(token: &CancellationToken) -> io::Result<()> {

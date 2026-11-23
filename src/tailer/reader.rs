@@ -44,6 +44,7 @@ pub struct Tailer {
     position: Arc<Mutex<Position>>,
     read_lock: tokio::sync::Mutex<()>,
     stop: CancellationToken,
+    start_at_end: bool,
 }
 impl Tailer {
     pub fn new(
@@ -60,7 +61,13 @@ impl Tailer {
             position: Arc::new(Mutex::new(Position::default())),
             read_lock: tokio::sync::Mutex::new(()),
             stop: CancellationToken::new(),
+            start_at_end: false,
         })
+    }
+    /// Applies only to the first generation, when no saved cursor exists.
+    pub fn with_start_at_end(mut self) -> Self {
+        self.start_at_end = true;
+        self
     }
     pub fn stop(&self) {
         self.stop.cancel();
@@ -134,12 +141,18 @@ impl Tailer {
                 p.offset = 0;
                 p.committed = 0;
                 // Load persisted progress only once. Reset generations never resurrect old offsets.
-                if first
-                    && let Some(c) = self.store.get(&key)
-                    && !should_reset(&c, identity.inode, metadata.len(), &prefix)
-                {
-                    p.offset = c.offset;
-                    p.committed = c.offset;
+                if first {
+                    match self.store.get(&key) {
+                        Some(c) if !should_reset(&c, identity.inode, metadata.len(), &prefix) => {
+                            p.offset = c.offset;
+                            p.committed = c.offset;
+                        }
+                        None if self.start_at_end => {
+                            p.offset = metadata.len();
+                            p.committed = metadata.len();
+                        }
+                        _ => {}
+                    }
                 }
             }
             p.initialized = true;

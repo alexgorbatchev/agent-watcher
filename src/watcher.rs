@@ -2,6 +2,7 @@
 use crate::{
     Acknowledgement,
     checkpoint::CheckpointStore,
+    discovery::Discovery,
     opencode::OpencodeReader,
     scanner::*,
     tailer::{CursorStore, DeliveryMode, Tailer, WatcherRegistry, default_cursor_path},
@@ -75,6 +76,7 @@ pub type Handler = Arc<
         + Send
         + Sync,
 >;
+pub type SessionFilter = Arc<dyn Fn(&crate::Session) -> bool + Send + Sync>;
 #[derive(Clone)]
 pub struct Config {
     pub harnesses: Vec<Harness>,
@@ -91,6 +93,10 @@ pub struct Config {
     pub cursor_prune_interval: Duration,
     pub cursor_flush_interval: Duration,
     pub process_snapshot_provider: Arc<dyn SnapshotProvider>,
+    /// Skip existing history only for sessions attached during the first scan.
+    /// Valid saved cursors take precedence, and later sessions start at byte zero.
+    pub start_at_end: bool,
+    pub session_filter: Option<SessionFilter>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -114,6 +120,8 @@ impl Default for Config {
             cursor_prune_interval: Duration::from_secs(3600),
             cursor_flush_interval: Duration::from_secs(2),
             process_snapshot_provider: Arc::new(LiveProcessProvider),
+            start_at_end: false,
+            session_filter: None,
         }
     }
 }
@@ -124,6 +132,11 @@ pub(crate) struct Session {
     pub started_at: i64,
     pub active: bool,
     pub subagents: Vec<SubagentTranscript>,
+    pub name: String,
+    pub last_active: i64,
+    pub state: SessionState,
+    pub state_updated_at: i64,
+    pub entrypoint: String,
 }
 struct ActiveTail {
     tailer: Arc<Tailer>,
@@ -138,10 +151,8 @@ pub(crate) struct Runner {
     pub checkpoints: Arc<CheckpointStore>,
     pub tracker: SessionTracker,
     pub registry: Arc<WatcherRegistry>,
-    pub claude: ClaudeCodeScanner,
-    pub pi: PiScanner,
-    pub codex: CodexScanner,
-    pub opencode: OpencodeScanner,
+    pub discovery: Discovery,
+    pub skip_history: bool,
     pub active: BTreeMap<Harness, BTreeMap<String, Session>>,
     tails: BTreeMap<PathBuf, ActiveTail>,
     subagents: BTreeSet<(String, String)>,
@@ -184,15 +195,9 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
     let checkpoints = Arc::new(CheckpointStore::open(&cfg.opencode_checkpoint_path)?);
     let tracker = SessionTracker::open(cfg.session_state_path.clone())?;
     let registry = WatcherRegistry::new()?;
-    let mut claude = ClaudeCodeScanner::new(cfg.claude_sessions_dirs.clone());
-    if !cfg.claude_projects_dir.as_os_str().is_empty() {
-        claude.set_projects_dirs(vec![cfg.claude_projects_dir.clone()]);
-    }
     let mut runner = Runner {
-        claude,
-        pi: PiScanner::new(cfg.pi_sessions_dir.clone()),
-        codex: CodexScanner::new(cfg.codex_sessions_dir.clone()),
-        opencode: OpencodeScanner::new(cfg.opencode_db_path.clone()),
+        discovery: Discovery::new(&cfg),
+        skip_history: cfg.start_at_end,
         cfg,
         handler,
         cursors,
@@ -231,6 +236,11 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
                 started_at: tracked.started_at,
                 active: true,
                 subagents: Vec::new(),
+                name: String::new(),
+                last_active: 0,
+                state: SessionState::Unknown,
+                state_updated_at: 0,
+                entrypoint: String::new(),
             },
         );
     }
@@ -311,7 +321,11 @@ impl Runner {
             self.registry.clone(),
             DeliveryMode::Explicit,
         ) {
-            Ok(tailer) => Arc::new(tailer),
+            Ok(tailer) => Arc::new(if self.skip_history {
+                tailer.with_start_at_end()
+            } else {
+                tailer
+            }),
             Err(error) => {
                 tracing::warn!(action="tailer_attach_failed",%error);
                 return;
@@ -386,6 +400,7 @@ impl Runner {
     }
     pub async fn poll(&self, cancel: &CancellationToken, session: &Session) -> io::Result<()> {
         OpencodeReader::new(&self.cfg.opencode_db_path, self.checkpoints.clone())
+            .with_start_at_end(self.skip_history)
             .poll(cancel, &session.event, &self.handler)
             .await
     }

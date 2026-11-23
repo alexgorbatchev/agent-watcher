@@ -12,6 +12,59 @@ use std::{
     },
 };
 use tokio_util::sync::CancellationToken;
+
+#[tokio::test]
+async fn live_database_view_seeds_initial_revisions_and_then_delivers_changes() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let temp = tempfile::tempdir_in(".tmp").unwrap();
+    let checkpoints = Arc::new(CheckpointStore::open(temp.path().join("checkpoints")).unwrap());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let handler: Handler = {
+        let events = events.clone();
+        Arc::new(move |_, event, ack| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                if let Some(ack) = ack {
+                    ack.acknowledge()?;
+                }
+                Ok(())
+            })
+        })
+    };
+    let cancel = CancellationToken::new();
+    let history = snapshot(
+        message(r#"{"role":"assistant","finish":"stop","tokens":{"input":7}}"#),
+        vec![part("text", r#"{"type":"text","text":"old"}"#, 200)],
+    );
+    OpencodeReader::new("unused", checkpoints.clone())
+        .with_start_at_end(true)
+        .deliver_snapshot(&cancel, &base(), history.clone(), &handler)
+        .await
+        .unwrap();
+    assert!(events.lock().unwrap().is_empty());
+    checkpoints.flush().unwrap();
+    let reader = OpencodeReader::new(
+        "unused",
+        Arc::new(CheckpointStore::open(temp.path().join("checkpoints")).unwrap()),
+    );
+    reader
+        .deliver_snapshot(&cancel, &base(), history, &handler)
+        .await
+        .unwrap();
+    assert!(events.lock().unwrap().is_empty());
+    let changed = snapshot(
+        message(r#"{"role":"assistant","finish":"stop","tokens":{"input":7}}"#),
+        vec![part("text", r#"{"type":"text","text":"new"}"#, 201)],
+    );
+    reader
+        .deliver_snapshot(&cancel, &base(), changed, &handler)
+        .await
+        .unwrap();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].parsed.data.content.as_deref(), Some("new"));
+}
 fn session() -> OpencodeSession {
     OpencodeSession {
         id: "s".into(),

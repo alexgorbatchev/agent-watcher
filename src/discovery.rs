@@ -16,12 +16,34 @@ use crate::{
 use agent_parser::{EventData, ParsedEvent};
 use std::{collections::BTreeMap, io};
 use tokio_util::sync::CancellationToken;
+
+pub(crate) struct Discovery {
+    pub claude: ClaudeCodeScanner,
+    pi: PiScanner,
+    codex: CodexScanner,
+    opencode: OpencodeScanner,
+}
+impl Discovery {
+    pub fn new(cfg: &crate::Config) -> Self {
+        let mut claude = ClaudeCodeScanner::new(cfg.claude_sessions_dirs.clone());
+        if !cfg.claude_projects_dir.as_os_str().is_empty() {
+            claude.set_projects_dirs(vec![cfg.claude_projects_dir.clone()]);
+        }
+        Self {
+            claude,
+            pi: PiScanner::new(cfg.pi_sessions_dir.clone()),
+            codex: CodexScanner::new(cfg.codex_sessions_dir.clone()),
+            opencode: OpencodeScanner::new(cfg.opencode_db_path.clone()),
+        }
+    }
+}
 impl Runner {
     pub async fn scan(&mut self, cancel: &CancellationToken) {
         let snapshot = match self.cfg.process_snapshot_provider.snapshot(cancel) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::warn!(action="process_snapshot_failed",%error);
+                self.skip_history = false;
                 return;
             }
         };
@@ -29,16 +51,44 @@ impl Runner {
             if cancel.is_cancelled() {
                 break;
             }
-            match self.discover(cancel, harness, &snapshot) {
-                Ok(sessions) => self.reconcile(cancel, harness, sessions).await,
+            match self.discovery.discover(cancel, harness, &snapshot) {
+                Ok(mut sessions) => {
+                    sessions.retain(|session| {
+                        !session.active
+                            || self
+                                .cfg
+                                .session_filter
+                                .as_ref()
+                                .is_none_or(|filter| filter(&session.snapshot()))
+                    });
+                    if harness == Harness::ClaudeCode {
+                        for session in &mut sessions {
+                            match self
+                                .discovery
+                                .claude
+                                .discover_subagents(&SessionDescriptor {
+                                    session_id: session.event.session_id.clone(),
+                                    transcript_path: session.path.clone(),
+                                    ..Default::default()
+                                }) {
+                                Ok(found) => session.subagents = found,
+                                Err(error) => tracing::warn!(action="subagent_scan_failed",%error),
+                            }
+                        }
+                    }
+                    self.reconcile(cancel, harness, sessions).await;
+                }
                 Err(error) => tracing::warn!(action="session_scan_failed",%harness,%error),
             }
         }
+        self.skip_history = false;
         if let Err(error) = self.tracker.save() {
             tracing::warn!(action="session_tracker_save_failed",%error);
         }
     }
-    fn discover(
+}
+impl Discovery {
+    pub fn discover(
         &mut self,
         cancel: &CancellationToken,
         harness: Harness,
@@ -56,16 +106,11 @@ impl Runner {
             .map(|descriptor| {
                 let mut last = descriptor.last_active;
                 let mut data = EventData::default();
-                let mut subagents = Vec::new();
                 if harness == Harness::ClaudeCode {
                     last =
                         extract_last_active_timestamp(&descriptor.transcript_path, 0).unwrap_or(0);
                     if descriptor.name_source == "custom" && !descriptor.name.is_empty() {
                         data.title = Some(descriptor.name.clone());
-                    }
-                    match self.claude.discover_subagents(&descriptor) {
-                        Ok(found) => subagents = found,
-                        Err(error) => tracing::warn!(action="subagent_scan_failed",%error),
                     }
                 }
                 if harness == Harness::Opencode {
@@ -95,11 +140,35 @@ impl Runner {
                     path: descriptor.transcript_path,
                     started_at: descriptor.started_at,
                     active: descriptor.is_active,
-                    subagents,
+                    subagents: Vec::new(),
+                    name: match harness {
+                        Harness::ClaudeCode => descriptor.name,
+                        Harness::Codex => descriptor.agent_nickname,
+                        Harness::Opencode => descriptor.title,
+                        Harness::Pi => String::new(),
+                    },
+                    last_active: if harness == Harness::Opencode {
+                        descriptor.updated_at
+                    } else {
+                        0
+                    },
+                    state: if harness == Harness::ClaudeCode {
+                        claude_session_state(&descriptor.status)
+                    } else {
+                        descriptor.state
+                    },
+                    state_updated_at: if harness == Harness::ClaudeCode {
+                        descriptor.status_updated_at
+                    } else {
+                        descriptor.state_updated_at
+                    },
+                    entrypoint: descriptor.entrypoint,
                 }
             })
             .collect())
     }
+}
+impl Runner {
     async fn reconcile(
         &mut self,
         cancel: &CancellationToken,

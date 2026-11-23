@@ -3,6 +3,7 @@
 # What It Does
 
 - **Session discovery**: Match session files and database records to running harness processes, including child sessions and Claude Code subagent transcripts.
+- **Live snapshots**: List running sessions without creating observer state, retaining file caches across repeated or concurrent calls.
 - **Incremental activity**: Follow JSONL appends and replacements, and read OpenCode message and part revisions without modifying harness storage.
 - **Durable acknowledgements**: Persist transcript byte offsets and database revisions so unacknowledged activity replays after restart.
 - **Owned shutdown**: Stop and join transcript workers when the caller cancels observation.
@@ -21,6 +22,9 @@
 3. Only the last event from a transcript line carries an acknowledgement, which confirms the entire line. Byte checkpoints advance through a contiguous acknowledged prefix. Database events carry individual revision acknowledgements; lifecycle events have none. OpenCode completion usage requires a completion marker and is emitted once per acknowledged assistant message.
 4. A handler error preserves pending transcript parsing state or rejects the database reservation for retry. Accepted, unacknowledged events remain pending during the run. After restart, transcripts replay when their session is active again; pending final OpenCode activity drains before the session's exit event. Crashes before a checkpoint flush can cause duplicate delivery. File replacement and truncation start a new generation; callbacks from previous generations cannot commit offsets into rewritten content.
 5. Byte and database checkpoints flush every two seconds and during shutdown; session state saves after discovery and at shutdown. Initial storage errors return to the caller; runtime read, handler, and persistence errors emit structured tracing diagnostics and retain retriable progress. Shutdown persistence failures remain diagnostics, so a successful return does not prove every acknowledgement reached disk. Each simultaneous observer requires separate state paths because files have no inter-process locking.
+6. `Snapshotter::new(config).snapshot(&cancel)` synchronously lists live sessions in harness/session order and captures processes once per call. Reuse a snapshotter to retain scanner caches; concurrent callers are serialized. Snapshots read harness storage without creating cursors, checkpoints, session-state files or background observers. A process-capture failure returns an error; an individual harness failure appears in `Snapshot.errors` alongside sessions found elsewhere. Snapshots use only harness selection, harness paths and the process provider.
+7. Live sessions report `unknown`, `working`, `waiting` or `idle`. Claude Code maps `busy`, `waiting` and `idle` status and preserves its status timestamp and entrypoint; other status strings remain unknown. Codex reports its last turn boundary, treating a working turn older than its current process as idle. Other harnesses report unknown while still running. Claude subagent transcripts are excluded from snapshots because retained transcripts cannot establish whether a subagent is still alive.
+8. `start_at_end` skips existing history for sessions attached during the initial discovery scan. Valid saved byte cursors take precedence, later sessions replay from the beginning, and replaced or truncated transcripts start a new generation at byte zero. Initial OpenCode revisions are acknowledged without delivery, while later revisions are delivered normally. `session_filter` selects active sessions before lifecycle events and transcript attachment; exited sessions still drain their final database activity.
 
 # Prerequisites
 
@@ -91,6 +95,8 @@ Explicit paths override environment defaults. Empty harness selection means all 
 | `cursor_prune_interval` | `Duration` | `1h` | Prune deleted or replaced transcript cursors. |
 | `cursor_flush_interval` | `Duration` | `2s` | Flush byte cursors and database revisions. |
 | `process_snapshot_provider` | `Arc<dyn SnapshotProvider>` | Live processes | Supply one immutable process snapshot per discovery tick. |
+| `start_at_end` | `bool` | `false` | Skip initial history when observing a live view. |
+| `session_filter` | `Option<SessionFilter>` | `None` | Retain only active sessions accepted by the thread-safe predicate. Snapshots ignore it. |
 
 Custom providers can iterate captured `ProcessSnapshot::processes()` and construct a filtered snapshot with `from_processes`. `declare_candidate(harness, ProcessInfo)` associates Pi, Codex, or OpenCode with an explicitly selected alias/interpreter process. It requires a captured live PID, its exact captured start time, and a working directory; repeated declarations replace that PID's candidate without altering actual process metadata. Claude Code uses PID descriptors instead. Cancellation and process-session filtering remain the provider's responsibility.
 
@@ -101,6 +107,8 @@ The data directory is `$XDG_DATA_HOME` or `~/.local/share`. The ai-registry path
 | Export | Purpose |
 | :--- | :--- |
 | `run(&CancellationToken, Config, Handler)` | Observe sessions asynchronously and return `io::Result<()>`. |
+| `Snapshotter` | Reuse cached read-only discovery with `new(Config)` and `snapshot(&CancellationToken) -> io::Result<Snapshot>`. |
+| `Session`, `Snapshot`, `ScanFailure` | Inspect normalized live-session identity, state, activity and per-harness failures. |
 | `Event` | Flatten `agent-parser` activity fields into serialized events with harness and session identity. |
 | `Acknowledgement::acknowledge()` | Confirm delivery; cloned callbacks share checkpoint state. |
 | `scanner` | Access native process snapshots, harness discovery, timestamp extraction, and persisted session tracking. |

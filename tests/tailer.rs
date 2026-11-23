@@ -9,6 +9,70 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[tokio::test]
+async fn live_attachment_skips_history_but_resumes_saved_offsets_and_new_generations() {
+    use std::io::Write;
+    fs::create_dir_all(".tmp").unwrap();
+    let dir = tempfile::tempdir_in(".tmp").unwrap();
+    let path = dir.path().join("session.jsonl");
+    fs::write(&path, "history\n").unwrap();
+    let store = Arc::new(CursorStore::open(dir.path().join("cursors")).unwrap());
+    let registry = WatcherRegistry::new().unwrap();
+    let cancel = CancellationToken::new();
+    let tail = Tailer::new(
+        &path,
+        store.clone(),
+        registry.clone(),
+        DeliveryMode::Automatic,
+    )
+    .unwrap()
+    .with_start_at_end();
+    tail.read_available(&cancel, |_| async { panic!("old history replayed") })
+        .await
+        .unwrap();
+    assert_eq!(tail.current_offset(), 8);
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "new").unwrap();
+    let mut delivered = Vec::new();
+    tail.read_available(&cancel, |line| {
+        delivered.push(line.bytes);
+        std::future::ready(Ok(()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(delivered, [b"new".to_vec()]);
+    store.flush().unwrap();
+    writeln!(file, "after-restart").unwrap();
+    let restored = Tailer::new(
+        &path,
+        store.clone(),
+        registry.clone(),
+        DeliveryMode::Automatic,
+    )
+    .unwrap()
+    .with_start_at_end();
+    delivered.clear();
+    restored
+        .read_available(&cancel, |line| {
+            delivered.push(line.bytes);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(delivered, [b"after-restart".to_vec()]);
+    fs::write(&path, "reset\n").unwrap();
+    delivered.clear();
+    restored
+        .read_available(&cancel, |line| {
+            delivered.push(line.bytes);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(delivered, [b"reset".to_vec()]);
+    registry.close();
+}
+
 #[test]
 fn native_watch_registration_during_events_does_not_deadlock() {
     use std::{

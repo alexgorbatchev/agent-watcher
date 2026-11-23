@@ -14,6 +14,99 @@ use std::{
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filtered_live_view_skips_initial_history_and_delivers_later_sessions_from_the_start() {
+    use std::io::Write;
+    std::fs::create_dir_all(".tmp").unwrap();
+    let temp = tempfile::tempdir_in(".tmp").unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let mut cfg = config(&root, Harness::ClaudeCode, Arc::new(AtomicBool::new(true)));
+    cfg.start_at_end = true;
+    cfg.session_filter = Some(Arc::new({
+        let root = root.clone();
+        move |session| !session.subagent && session.cwd == root
+    }));
+    cfg.process_snapshot_provider = Arc::new({
+        let root = root.clone();
+        move |_: &CancellationToken| {
+            Ok(ProcessSnapshot::from_processes((42..=44).map(|pid| {
+                ProcessMeta {
+                    pid,
+                    name: "claude".into(),
+                    alive: true,
+                    cwd: root.clone(),
+                    ..Default::default()
+                }
+            })))
+        }
+    });
+    let path = fixture(&cfg, Harness::ClaudeCode);
+    let rejected = root.join("rejected.jsonl");
+    write(
+        &rejected,
+        &format!(
+            "{}\n",
+            json!({"type":"user","message":{"role":"user","content":"must not deliver"}})
+        ),
+    );
+    write(&cfg.claude_sessions_dirs[0].join("rejected.json"), &json!({"pid":43,"sessionId":"rejected","cwd":root.join("other"),"transcriptPath":rejected}).to_string());
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (token, worker) = start(cfg.clone(), collect(sender, true));
+    assert_eq!(
+        event(&mut receiver, "run_started").await.session_id,
+        "session"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), receiver.recv())
+            .await
+            .is_err(),
+        "initial or filtered history replayed"
+    );
+    let stamp = chrono::Utc::now().to_rfc3339();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"type":"user","timestamp":stamp,"message":{"role":"user","content":"new prompt"}})
+    )
+    .unwrap();
+    let prompt = event(&mut receiver, "turn_start").await;
+    assert_eq!(prompt.session_id, "session");
+    assert_eq!(prompt.parsed.data.content.as_deref(), Some("new prompt"));
+    let later = root.join("later.jsonl");
+    write(
+        &later,
+        &format!(
+            "{}\n",
+            json!({"type":"user","timestamp":stamp,"message":{"role":"user","content":"first prompt"}})
+        ),
+    );
+    write(
+        &cfg.claude_sessions_dirs[0].join("later.json"),
+        &json!({"pid":44,"sessionId":"later","cwd":root,"transcriptPath":later}).to_string(),
+    );
+    assert_eq!(
+        event(&mut receiver, "run_started").await.session_id,
+        "later"
+    );
+    let prompt = event(&mut receiver, "turn_start").await;
+    assert_eq!(prompt.session_id, "later");
+    assert_eq!(prompt.parsed.data.content.as_deref(), Some("first prompt"));
+    stop(token, worker).await;
+    let tracked = SessionTracker::open(cfg.session_state_path)
+        .unwrap()
+        .get_all();
+    assert_eq!(tracked.len(), 2);
+    assert!(
+        !tracked
+            .values()
+            .any(|session| session.session_id == "rejected")
+    );
+}
 fn write(path: &Path, content: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();

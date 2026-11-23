@@ -1,5 +1,5 @@
 use super::{
-    ProcessSnapshot, SessionDescriptor, check_cancel,
+    ProcessSnapshot, SessionDescriptor, SessionState, check_cancel,
     paths::clean_path,
     process::pair_process,
     timestamps::{extract_last_active_timestamp, header_timestamp, mtime, rfc_timestamp},
@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, Metadata},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -139,6 +139,7 @@ struct Cached {
     descriptor: SessionDescriptor,
     header_time: i64,
     file_time: i64,
+    turn: Option<(SessionState, i64)>,
 }
 #[derive(Debug, Default)]
 struct TranscriptScanner {
@@ -242,6 +243,7 @@ impl TranscriptScanner {
                     descriptor,
                     header_time,
                     file_time,
+                    turn: None,
                 })
             })();
             if let Ok(cached) = parsed {
@@ -322,6 +324,74 @@ impl CodexScanner {
         token: &CancellationToken,
         snapshot: &ProcessSnapshot,
     ) -> io::Result<Vec<SessionDescriptor>> {
-        self.0.scan(token, snapshot.codex_processes())
+        let mut sessions = self.0.scan(token, snapshot.codex_processes())?;
+        for session in sessions.iter_mut().filter(|session| session.is_active) {
+            check_cancel(token)?;
+            let turn = self.0.cache.get_mut(&session.transcript_path).unwrap();
+            let (state, at) = *turn.turn.get_or_insert_with(|| {
+                read_codex_turn(&session.transcript_path).unwrap_or((SessionState::Unknown, 0))
+            });
+            let process_start = snapshot
+                .process(session.pid)
+                .map_or(0, |process| process.create_time);
+            session.state = if state == SessionState::Working && at < process_start {
+                SessionState::Idle
+            } else {
+                state
+            };
+            session.state_updated_at = at;
+        }
+        Ok(sessions)
     }
+}
+
+// Bound cold scans of large rollouts; unchanged active files retain their result.
+fn read_codex_turn(path: &Path) -> io::Result<(SessionState, i64)> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let start = size.saturating_sub(32 * 1024 * 1024);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.take(32 * 1024 * 1024).read_to_end(&mut bytes)?;
+    let bytes = if start > 0 {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(&[][..], |index| &bytes[index + 1..])
+    } else {
+        &bytes
+    };
+    for line in bytes.rsplit(|byte| *byte == b'\n') {
+        if ![
+            "task_started",
+            "turn_started",
+            "task_complete",
+            "turn_complete",
+            "turn_aborted",
+        ]
+        .iter()
+        .any(|kind| line.windows(kind.len()).any(|part| part == kind.as_bytes()))
+        {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if event["type"] != "event_msg" {
+            continue;
+        }
+        let state = match event["payload"]["type"].as_str() {
+            Some("task_started" | "turn_started") => SessionState::Working,
+            Some("task_complete" | "turn_complete" | "turn_aborted") => SessionState::Idle,
+            _ => continue,
+        };
+        return Ok((
+            state,
+            event["timestamp"]
+                .as_str()
+                .and_then(rfc_timestamp)
+                .unwrap_or(0),
+        ));
+    }
+    Ok((SessionState::Unknown, 0))
 }

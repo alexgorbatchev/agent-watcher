@@ -14,7 +14,7 @@ Reusable Rust session discovery, lifecycle observation, and acknowledged transcr
 - Behavioral tests and doctests: `just test`.
 - Format this package: `just fmt`.
 - Format check and strict Clippy: `just lint`.
-- At least 90% line coverage: `just coverage`.
+- At least 90% line and function coverage across non-test package source: `just coverage`.
 - All checks: `just check`.
 
 ## Contracts

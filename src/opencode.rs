@@ -93,13 +93,19 @@ pub fn opencode_message_events(
 pub struct OpencodeReader {
     path: PathBuf,
     checkpoints: Arc<CheckpointStore>,
+    start_at_end: bool,
 }
 impl OpencodeReader {
     pub fn new(path: impl AsRef<Path>, checkpoints: Arc<CheckpointStore>) -> Self {
         Self {
             path: path.as_ref().into(),
             checkpoints,
+            start_at_end: false,
         }
+    }
+    pub fn with_start_at_end(mut self, start_at_end: bool) -> Self {
+        self.start_at_end = start_at_end;
+        self
     }
     pub async fn poll(
         &self,
@@ -199,6 +205,10 @@ impl OpencodeReader {
                 else {
                     continue;
                 };
+                if self.start_at_end {
+                    reservation.acknowledgement.acknowledge()?;
+                    continue;
+                }
                 let mut event = session.clone();
                 event.parsed = parsed.parsed;
                 if let Err(error) =

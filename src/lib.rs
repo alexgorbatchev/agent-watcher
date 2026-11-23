@@ -5,10 +5,12 @@ pub mod discovery;
 pub mod opencode;
 mod persistence;
 pub mod scanner;
+mod snapshot;
 pub mod tailer;
 pub mod transcript;
 pub mod watcher;
 
+pub use snapshot::{ScanFailure, Session, Snapshot, Snapshotter};
 pub use watcher::{Config, Event, Handler, HandlerFuture, Harness, run};
 
 use std::{io, sync::Arc};
