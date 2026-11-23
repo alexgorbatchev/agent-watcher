@@ -311,9 +311,9 @@ impl Runner {
         event.parsed.event_type = kind.into();
         (self.handler)(cancel, event, None).await
     }
-    pub fn attach(&mut self, cancel: &CancellationToken, session: &Session) {
+    pub async fn prepare_tail(&self, session: &Session) -> Option<Arc<Tailer>> {
         if session.path.as_os_str().is_empty() || self.tails.contains_key(&session.path) {
-            return;
+            return None;
         }
         let tailer = match Tailer::new(
             &session.path,
@@ -328,8 +328,24 @@ impl Runner {
             }),
             Err(error) => {
                 tracing::warn!(action="tailer_attach_failed",%error);
-                return;
+                return None;
             }
+        };
+        if self.skip_history
+            && let Err(error) = tailer.initialize().await
+        {
+            tracing::warn!(action="tailer_initialize_failed",%error);
+        }
+        Some(tailer)
+    }
+    pub fn attach(
+        &mut self,
+        cancel: &CancellationToken,
+        session: &Session,
+        tailer: Option<Arc<Tailer>>,
+    ) {
+        let Some(tailer) = tailer else {
+            return;
         };
         let reader = Arc::new(tokio::sync::Mutex::new(TranscriptReader::new(
             session.event.clone(),
@@ -379,6 +395,7 @@ impl Runner {
             session.event.subagent_id = Some(sub.subagent_id.clone());
             session.event.parsed.data = EventData::default();
             let key = (parent.event.session_id.clone(), sub.subagent_id.clone());
+            let tailer = self.prepare_tail(&session).await;
             if !self.subagents.contains(&key) {
                 let now = chrono::Utc::now().timestamp_millis();
                 session.event.parsed.timestamp = extract_first_timestamp(&sub.path)
@@ -395,7 +412,7 @@ impl Runner {
                 }
                 self.subagents.insert(key);
             }
-            self.attach(cancel, &session);
+            self.attach(cancel, &session, tailer);
         }
     }
     pub async fn poll(&self, cancel: &CancellationToken, session: &Session) -> io::Result<()> {

@@ -179,6 +179,7 @@ impl Runner {
         let mut next = BTreeMap::new();
         for session in sessions.into_iter().filter(|session| session.active) {
             let id = session.event.session_id.clone();
+            let tailer = self.prepare_tail(&session).await;
             if !previous.contains_key(&id)
                 && let Err(error) = self
                     .lifecycle(cancel, session.event.clone(), "run_started")
@@ -196,7 +197,7 @@ impl Runner {
                 started_at: session.started_at,
                 is_active: true,
             });
-            self.attach(cancel, &session);
+            self.attach(cancel, &session, tailer);
             self.attach_subagents(cancel, &session).await;
             if harness == Harness::Opencode
                 && let Err(error) = self.poll(cancel, &session).await

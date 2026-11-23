@@ -78,6 +78,12 @@ impl Tailer {
     pub fn committed_offset(&self) -> u64 {
         self.position.lock().unwrap().committed
     }
+    /// Resolve the initial cursor without delivering lines. Call before announcing
+    /// a live attachment so appends after that announcement remain observable.
+    pub async fn initialize(&self) -> io::Result<()> {
+        let _read = self.read_lock.lock().await;
+        self.open_at_offset().await.map(|_| ())
+    }
     fn checkpoint(&self, offset: u64) -> (u64, Acknowledgement) {
         let generation = self.position.lock().unwrap().generation;
         let position = self.position.clone();
@@ -115,6 +121,38 @@ impl Tailer {
         Fut: Future<Output = io::Result<()>>,
     {
         let _read = tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),lock=self.read_lock.lock()=>lock};
+        let (file, mut offset) = self.open_at_offset().await?;
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
+        loop {
+            let mut bytes = Vec::new();
+            let length = tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),_=self.stop.cancelled()=>return Ok(()),result=reader.read_until(b'\n',&mut bytes)=>result?};
+            if length == 0 || bytes.last() != Some(&b'\n') {
+                break;
+            }
+            offset = offset
+                .checked_add(length as u64)
+                .ok_or_else(|| io::Error::other("transcript offset overflow"))?;
+            while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+                bytes.pop();
+            }
+            let (generation, acknowledgement) = self.checkpoint(offset);
+            if !bytes.is_empty() {
+                handler(Line {
+                    bytes,
+                    offset,
+                    generation,
+                    acknowledgement: acknowledgement.clone(),
+                })
+                .await?;
+            }
+            self.position.lock().unwrap().offset = offset;
+            if self.mode == DeliveryMode::Automatic {
+                acknowledgement.acknowledge()?;
+            }
+        }
+        Ok(())
+    }
+    async fn open_at_offset(&self) -> io::Result<(File, u64)> {
         let mut file = File::open(&self.path).await?;
         let metadata = file.metadata().await?;
         let identity = FileIdentity::read(&metadata);
@@ -163,36 +201,7 @@ impl Tailer {
             p.offset
         };
         file.seek(io::SeekFrom::Start(offset)).await?;
-        let mut reader = BufReader::with_capacity(64 * 1024, file);
-        let mut offset = offset;
-        loop {
-            let mut bytes = Vec::new();
-            let length = tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),_=self.stop.cancelled()=>return Ok(()),result=reader.read_until(b'\n',&mut bytes)=>result?};
-            if length == 0 || bytes.last() != Some(&b'\n') {
-                break;
-            }
-            offset = offset
-                .checked_add(length as u64)
-                .ok_or_else(|| io::Error::other("transcript offset overflow"))?;
-            while matches!(bytes.last(), Some(b'\n' | b'\r')) {
-                bytes.pop();
-            }
-            let (generation, acknowledgement) = self.checkpoint(offset);
-            if !bytes.is_empty() {
-                handler(Line {
-                    bytes,
-                    offset,
-                    generation,
-                    acknowledgement: acknowledgement.clone(),
-                })
-                .await?;
-            }
-            self.position.lock().unwrap().offset = offset;
-            if self.mode == DeliveryMode::Automatic {
-                acknowledgement.acknowledge()?;
-            }
-        }
-        Ok(())
+        Ok((file, offset))
     }
     pub async fn run<F, Fut>(
         self: Arc<Self>,

@@ -52,28 +52,30 @@ async fn filtered_live_view_skips_initial_history_and_delivers_later_sessions_fr
     );
     write(&cfg.claude_sessions_dirs[0].join("rejected.json"), &json!({"pid":43,"sessionId":"rejected","cwd":root.join("other"),"transcriptPath":rejected}).to_string());
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let (token, worker) = start(cfg.clone(), collect(sender, true));
+    let collect = collect(sender, true);
+    let handler: Handler = Arc::new(move |cancel, event, acknowledgement| {
+        // Write before the lifecycle handler returns, before a worker can attach.
+        // The live boundary must already exist when the start is announced.
+        if event.parsed.event_type == "run_started" && event.session_id == "session" {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"user","message":{"role":"user","content":"new prompt"}})
+            )
+            .unwrap();
+        }
+        collect(cancel, event, acknowledgement)
+    });
+    let (token, worker) = start(cfg.clone(), handler);
     assert_eq!(
         event(&mut receiver, "run_started").await.session_id,
         "session"
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(80), receiver.recv())
-            .await
-            .is_err(),
-        "initial or filtered history replayed"
-    );
     let stamp = chrono::Utc::now().to_rfc3339();
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(
-        file,
-        "{}",
-        json!({"type":"user","timestamp":stamp,"message":{"role":"user","content":"new prompt"}})
-    )
-    .unwrap();
     let prompt = event(&mut receiver, "turn_start").await;
     assert_eq!(prompt.session_id, "session");
     assert_eq!(prompt.parsed.data.content.as_deref(), Some("new prompt"));
