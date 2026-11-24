@@ -179,8 +179,12 @@ func (r *runner) reconcile(ctx context.Context, harness Harness, sessions []sess
 			}
 			continue
 		}
+		prepared := r.prepareTail(ctx, s)
 		if !previous[s.SessionID].active {
 			if err := r.emitLifecycle(ctx, s.Event, "run_started"); err != nil {
+				if prepared != nil {
+					prepared.active.cancel()
+				}
 				continue
 			}
 		}
@@ -188,7 +192,7 @@ func (r *runner) reconcile(ctx context.Context, harness Harness, sessions []sess
 		r.tracker.Set(s.SessionID, scanner.TrackedSession{SessionID: s.SessionID,
 			Harness: string(harness), PID: s.PID, CWD: s.CWD, HarnessVersion: s.HarnessVersion,
 			StartedAt: s.startedAt, IsActive: true})
-		r.attach(ctx, s)
+		r.attach(s, prepared)
 		r.attachSubagents(ctx, s)
 		if harness == HarnessOpencode {
 			_ = r.pollOpencode(ctx, s) // Read/delivery failures are logged and retried next tick.
@@ -232,19 +236,29 @@ func (r *runner) attachSubagents(ctx context.Context, parent session) {
 			seen = make(map[string]bool)
 			r.subagents[parent.SessionID] = seen
 		}
+		prepared := r.prepareTail(ctx, s)
 		if !seen[sub.SubagentID] {
 			s.Timestamp = time.Now().UnixMilli()
 			if first, err := scanner.ExtractFirstActiveTimestamp(sub.TranscriptPath); err == nil && first > 0 && first < s.Timestamp {
 				s.Timestamp = first
 			}
+			if ctx.Err() != nil {
+				if prepared != nil {
+					prepared.active.cancel()
+				}
+				return
+			}
 			if s.startedAt > 0 && s.Timestamp < s.startedAt {
 				s.Timestamp = s.startedAt
 			}
 			if err := r.emitLifecycle(ctx, s.Event, "run_started"); err != nil {
+				if prepared != nil {
+					prepared.active.cancel()
+				}
 				continue
 			}
 			seen[sub.SubagentID] = true
 		}
-		r.attach(ctx, s)
+		r.attach(s, prepared)
 	}
 }

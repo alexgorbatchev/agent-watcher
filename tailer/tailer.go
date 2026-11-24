@@ -210,6 +210,17 @@ func (t *Tailer) commit(offset int64, generation uint64) error {
 }
 
 func (t *Tailer) readAvailable() error {
+	return t.read(false)
+}
+
+// Prepare resolves the initial file generation and cursor without delivering
+// lines. Call it before announcing readiness when new output must not be
+// mistaken for history by WithStartAtEnd.
+func (t *Tailer) Prepare() error {
+	return t.read(true)
+}
+
+func (t *Tailer) read(prepareOnly bool) error {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -271,6 +282,9 @@ func (t *Tailer) readAvailable() error {
 
 	startOffset := t.offset
 	t.mu.Unlock()
+	if prepareOnly {
+		return nil
+	}
 
 	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
 		return fmt.Errorf("seeking to offset %d: %w", startOffset, err)

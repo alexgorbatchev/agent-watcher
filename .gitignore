@@ -5,6 +5,7 @@ coverage.out
 .tmp/
 .codegraph/
 .cache/
+.state/
 .pi-subagents/
 
 # OS / Editor files
