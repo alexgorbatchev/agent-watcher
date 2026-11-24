@@ -32,9 +32,14 @@ func parseLineForHarness(harness Harness, line []byte, cwd string, ccParser *par
 	}
 }
 
-func (r *runner) attach(ctx context.Context, s session) {
+type preparedTail struct {
+	active *activeTail
+	start  func()
+}
+
+func (r *runner) prepareTail(ctx context.Context, s session) *preparedTail {
 	if s.path == "" || r.tails[s.path] != nil {
-		return
+		return nil
 	}
 	tailCtx, cancel := context.WithCancel(ctx)
 	reader := &transcriptReader{runner: r, session: s}
@@ -48,22 +53,39 @@ func (r *runner) attach(ctx context.Context, s session) {
 	if err != nil {
 		cancel()
 		r.logger.Warn("tailer_attach_failed", "path", s.path, "err", err)
-		return
+		return nil
 	}
 	reader.tailer = t
-	r.tails[s.path] = &activeTail{tailer: t, cancel: cancel, sessionID: s.SessionID, harness: s.Harness}
+	if err := t.Prepare(); err != nil {
+		cancel()
+		r.logger.Warn("tailer_prepare_failed", "path", s.path, "err", err)
+		return nil
+	}
+	return &preparedTail{
+		active: &activeTail{tailer: t, cancel: cancel, sessionID: s.SessionID, harness: s.Harness},
+		start: func() {
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				if err := t.Start(tailCtx); err != nil && tailCtx.Err() == nil {
+					r.logger.Warn("tailer_failed", "path", s.path, "err", err)
+				}
+			}()
+		},
+	}
+}
+
+func (r *runner) attach(s session, prepared *preparedTail) {
+	if prepared == nil {
+		return
+	}
+	r.tails[s.path] = prepared.active
 	attrs := []any{"harness", s.Harness, "sessionId", s.SessionID, "pid", s.PID, "cwd", s.CWD, "path", s.path}
 	if s.SubagentID != nil {
 		attrs = append(attrs, "subagentId", *s.SubagentID)
 	}
 	r.logger.Info("session_attached", attrs...)
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		if err := t.Start(tailCtx); err != nil && tailCtx.Err() == nil {
-			r.logger.Warn("tailer_failed", "path", s.path, "err", err)
-		}
-	}()
+	prepared.start()
 }
 
 type transcriptReader struct {
