@@ -1,39 +1,21 @@
-# agent-watcher justfile
-
-# Default recipe: list available recipes
 default:
     @just --list
 
-# Run all unit tests with race detector and coverage
-test *args:
-    scripts/check-coverage.sh -race -cover {{ if args == "" { "./..." } else { args } }}
+build:
+    cargo build --all-targets --locked
 
-# Run static code analysis
-vet:
-    go vet ./...
+test:
+    cargo test --all-targets --locked
+    cargo test --doc --locked
 
-# Check formatting, module hygiene, vet and static analysis
-lint:
-    scripts/check-format.sh
-    go mod tidy -diff
-    go vet ./...
-    golangci-lint run
-
-# Format Go code
 fmt:
-    go fmt ./...
+    cargo fmt --package agent-watcher
 
-# Run module hygiene check
-tidy:
-    go mod tidy -diff
+lint:
+    cargo fmt --package agent-watcher -- --check
+    cargo clippy --all-targets --locked -- -D warnings
 
-# Run static analysis and test suite in sequence
-check: lint test
+coverage:
+    cargo llvm-cov --all-targets --locked --fail-under-lines 90 --fail-under-functions 90
 
-# Clean build and coverage artifacts
-clean:
-    rm -rf bin dist coverage.out
-
-# Download project dependencies for local development
-setup:
-    go mod download
+check: lint test coverage

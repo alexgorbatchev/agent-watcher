@@ -3,9 +3,9 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 permissions:
   contents: read
@@ -20,36 +20,25 @@ jobs:
       matrix:
         os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: 'go.mod'
-
       - uses: extractions/setup-just@v4
-
-      - name: Check module hygiene
-        run: go mod tidy -diff
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: just test
+      - uses: Swatinem/rust-cache@v2
+      - run: just build test
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Check formatting
-        run: scripts/check-format.sh
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.2
+      - uses: extractions/setup-just@v4
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy llvm-tools --toolchain stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install coverage tool
+        run: |
+          if ! cargo llvm-cov --version | grep -Fx 'cargo-llvm-cov 0.9.1'; then
+            cargo install --locked --version 0.9.1 cargo-llvm-cov
+          fi
+      - run: just lint coverage

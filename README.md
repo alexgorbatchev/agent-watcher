@@ -1,129 +1,133 @@
-`agent-watcher` discovers Claude Code, Pi, Codex, and OpenCode sessions and streams lifecycle and parsed activity events to Go applications. Consumers choose how to store, display, or transport events and acknowledge them after delivery.
+`agent-watcher` discovers Claude Code, Pi, Codex, OpenCode, and Antigravity sessions and delivers lifecycle and parsed activity events to Rust applications. Consumers choose their storage, display, and delivery policy, then acknowledge events after delivery succeeds.
+
+The Go implementation is deprecated. See the [`go-legacy` branch](https://github.com/alexgorbatchev/agent-watcher/tree/go-legacy) for its source. Existing Go release tags remain available.
 
 # What It Does
 
-- **Session discovery**: Matches harness sessions to running processes, including Claude Code transcripts and OpenCode child sessions.
-- **Activity events**: Emits the event model from `agent-parser` together with harness, session, subagent, and process identity.
-- **Incremental watching**: Follows JSONL transcripts through appends and atomic replacement, and polls OpenCode's read-only SQLite database for message and part revisions.
-- **Acknowledged checkpoints**: Persists delivered transcript offsets and database event revisions for restart replay.
+- **Session discovery**: Match session files and database records to running harness processes, including child sessions and Claude Code subagent transcripts.
+- **On-demand snapshots**: List live sessions and their reported state without opening observer state files.
+- **Incremental activity**: Follow JSONL appends and replacements, and read OpenCode message and part revisions without modifying harness storage.
+- **Durable acknowledgements**: Persist transcript byte offsets and database revisions so unacknowledged activity replays after restart.
+- **Owned shutdown**: Stop and join transcript workers when the caller cancels observation.
 
 # How It Works
 
-1. Call `watcher.Run` with a context, configuration, and event handler.
-2. Receive `run_started`, parsed activity events, and `run_exited` as sessions appear, change, and exit.
-3. Deliver each event. Call its acknowledgement when delivery is durable, if an acknowledgement is supplied.
-4. Cancel the context and wait for `Run` to return so workers stop and checkpoints flush.
+1. Pass a cancellation token, `Config`, and asynchronous event handler to `run`.
+2. Receive session lifecycle events and parsed activity with harness, session, subagent, and process identity.
+3. Deliver each event and call its supplied acknowledgement after delivery is durable.
+4. Cancel the token and await `run` so workers stop and checkpoints flush.
 
 # How it Really Works
 
-- `Run` blocks. Handlers for different transcripts can execute concurrently and must honor context cancellation. Each simultaneous `Run` needs separate checkpoint and session-state files.
-- Discovery and OpenCode database reads run every two seconds by default. JSONL appends trigger filesystem watches. OpenCode completion usage is emitted only after a completion marker and once per acknowledged assistant message.
-- A transcript line can produce several events. Only its last event has an acknowledgement, which represents delivery of the whole line. Each OpenCode event revision has its own acknowledgement. Lifecycle events have none.
-- Returning a handler error pauses that transcript or retries the database event on a later scan. Accepted events are not re-emitted in the same run while their acknowledgement is pending. Unacknowledged events replay after restart. Duplicate delivery remains possible across crashes or checkpoint flushes, so consumers should tolerate replay.
-- Default persistence lives in `$XDG_CACHE_HOME/agent-watcher/`, or `~/.cache/agent-watcher/`: `observer-cursors.json`, `observer-cursors.json.opencode`, and `observer-sessions.json`. Checkpoints flush every two seconds and on shutdown. Runtime read and persistence errors are logged; invalid configuration or unreadable initial checkpoint state makes `Run` return an error.
-- Harness storage is read-only. The library performs no network delivery and does no work at import time. Empty configuration paths consult the harness environment variables listed below; configuration never changes process environment variables.
+1. `run` observes until cancellation. Handlers for different transcripts can execute concurrently and must honor their cancellation token. Normal cancellation returns `Ok(())`; a token cancelled before initialization returns `Interrupted` without accessing storage.
+2. Discovery and database polling default to two seconds. Filesystem notifications follow JSONL appends, with a ten-second polling fallback. Harness storage is read-only; only observer checkpoint and session-state files are written. The library sends no network requests and performs no work at import time.
+3. Only the last event from a transcript line carries an acknowledgement, which confirms the entire line. Byte checkpoints advance through a contiguous acknowledged prefix. Database events carry individual revision acknowledgements; lifecycle events have none. OpenCode completion usage requires a completion marker and is emitted once per acknowledged assistant message.
+4. A handler error preserves pending transcript parsing state or rejects the database reservation for retry. Accepted, unacknowledged events remain pending during the run. After restart, transcripts replay when their session is active again; pending final OpenCode activity drains before the session's exit event. Crashes before a checkpoint flush can cause duplicate delivery. File replacement and truncation start a new generation; callbacks from previous generations cannot commit offsets into rewritten content.
+5. Byte and database checkpoints flush every two seconds and during shutdown; session state saves after discovery and at shutdown. Initial storage errors return to the caller; runtime read, handler, and persistence errors emit structured tracing diagnostics and retain retriable progress. Shutdown persistence failures remain diagnostics, so a successful return does not prove every acknowledgement reached disk. Each simultaneous observer requires separate state paths because files have no inter-process locking.
 
 # Prerequisites
 
-- [Go](https://go.dev/) 1.26.2 or newer.
-- Local harness session files or an OpenCode SQLite database accessible to the current user, and permission to inspect that user's processes.
+- Accessible local harness transcripts or an OpenCode SQLite database, and permission to inspect the current user's processes.
+- A [Tokio](https://docs.rs/tokio/latest/tokio/) runtime for asynchronous observation.
 
 # Installation
 
-```bash
-go get github.com/alexgorbatchev/agent-watcher
+From a consuming Rust project:
+
+```sh
+cargo add agent-watcher --git https://github.com/alexgorbatchev/agent-watcher.git
+cargo add tokio --features macros,rt-multi-thread,time
+cargo add tokio-util
 ```
+
+Cargo records the resolved Git revision in the consuming project's lockfile. This package is not published to crates.io.
 
 # Quick Start
 
-```go
-package main
+This observer prints activity for five seconds. A durable consumer acknowledges after its storage transaction or downstream delivery succeeds.
 
-import (
-    "context"
-    "errors"
-    "fmt"
-    "os"
-    "os/signal"
+```rust,no_run
+use agent_watcher::{Config, Handler, run};
+use std::{io, sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
-    watcher "github.com/alexgorbatchev/agent-watcher"
-)
-
-func main() {
-    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-    defer stop()
-    err := watcher.Run(ctx, watcher.Config{}, func(ctx context.Context, event watcher.Event, acknowledge func()) error {
-        if err := ctx.Err(); err != nil {
-            return err
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        stop.cancel();
+    });
+    let handler: Handler = Arc::new(|cancel, event, acknowledge| Box::pin(async move {
+        if cancel.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "delivery cancelled"));
         }
-        if _, err := fmt.Printf("%s %s %s\n", event.Harness, event.SessionID, event.EventType); err != nil {
-            return err
+        use std::io::Write;
+        writeln!(io::stdout().lock(), "{} {} {}", event.harness, event.session_id, event.parsed.event_type)?;
+        if let Some(acknowledge) = acknowledge {
+            acknowledge.acknowledge()?;
         }
-        if acknowledge != nil {
-            acknowledge()
-        }
-        return nil
-    })
-    if err != nil && !errors.Is(err, context.Canceled) {
-        fmt.Fprintln(os.Stderr, err)
-        os.Exit(1)
-    }
+        Ok(())
+    }));
+    run(&cancel, Config::default(), handler).await
 }
 ```
 
-This handler acknowledges after writing to stdout. A durable consumer acknowledges after its storage transaction or downstream delivery succeeds.
+# Configuration
+
+An empty harness selection includes all five harnesses. Zero durations select their defaults.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `harnesses` | `Vec<Harness>` | All five | Select `ClaudeCode`, `Pi`, `Codex`, `Opencode`, or `Agy`. |
+| `scan_interval` | `Duration` | `2s` | Discovery and database polling period. |
+| `claude_sessions_dirs` | `Vec<PathBuf>` | Harness paths | `$CLAUDE_SESSIONS_DIR`, ai-registry sessions under the data directory, `$CLAUDE_CONFIG_DIR/sessions`, and `~/.claude/sessions`. |
+| `claude_projects_dir` | `PathBuf` | Harness paths | Uses the explicit directory or `$CLAUDE_PROJECTS_DIR` first, then ai-registry projects under the data directory, `$CLAUDE_CONFIG_DIR/projects`, and `~/.claude/projects`. |
+| `pi_sessions_dir` | `PathBuf` | Harness path | `$PI_SESSIONS_DIR`, `$PI_CODING_AGENT_DIR/sessions`, or `~/.pi/agent/sessions`. |
+| `codex_sessions_dir` | `PathBuf` | Harness path | `$CODEX_SESSIONS_DIR`, `$CODEX_HOME/sessions`, or `~/.codex/sessions`. |
+| `opencode_db_path` | `PathBuf` | Harness path | `$OPENCODE_DB_PATH`, or `opencode/opencode.db` beneath the data directory. |
+| `agy_sessions_dir` | `PathBuf` | Harness path | `$AGY_SESSIONS_DIR`, `$GEMINI_HOME/antigravity-cli/brain`, or `~/.gemini/antigravity-cli/brain`. |
+| `start_at_end` | `bool` | `false` | Skip existing activity on the first discovery scan. Saved transcript offsets take precedence. |
+| `session_filter` | `Option<SessionFilter>` | `None` | Gate observation of live sessions using their snapshot fields. |
+| `cursor_path` | `PathBuf` | Observer cache | `observer-cursors.json` beneath `$XDG_CACHE_HOME/agent-watcher` or `~/.cache/agent-watcher`. |
+| `opencode_checkpoint_path` | `PathBuf` | Cursor path + `.opencode` | Acknowledged database revisions. |
+| `session_state_path` | `PathBuf` | Observer cache | `observer-sessions.json` for exit detection across restarts. |
+| `cursor_retention` | `Duration` | `24h` | Retention for inaccessible transcripts; matching existing files retain progress regardless of age. |
+| `cursor_prune_interval` | `Duration` | `1h` | Prune deleted or replaced transcript cursors. |
+| `cursor_flush_interval` | `Duration` | `2s` | Flush byte cursors and database revisions. |
+| `process_snapshot_provider` | `Arc<dyn SnapshotProvider>` | Live processes | Supply one immutable process snapshot per discovery tick. |
+
+Custom providers can use `ProcessSnapshot::capture_filtered` to capture selected live PIDs or construct a snapshot from supplied process metadata. `declare_candidate(harness, ProcessInfo)` associates Pi, Codex, OpenCode, or Antigravity with an explicitly selected process. It requires a captured live PID, its exact captured start time, and a working directory. Repeated declarations replace that PID's candidate. Claude Code uses its session file's PID.
+
+The data directory is `$XDG_DATA_HOME` or `~/.local/share`. The ai-registry paths are `ai-registry/claude-code/sessions` and `ai-registry/claude-code/projects` beneath it. Logging uses the application's tracing subscriber.
 
 # API
 
 | Export | Purpose |
 | :--- | :--- |
-| `Run(ctx, config, handler) error` | Own discovery, watching, worker shutdown, and checkpoint persistence. Normal cancellation returns nil; an already cancelled context returns its error without I/O. |
-| `Snapshot(ctx, config) ([]Session, error)` | List the sessions running now, one shot. Reads no transcript history and needs no cursors, tailers, session tracker, or handler. A harness that fails does not hide the others: the sessions found are returned with the joined error. |
-| `NewSnapshotter(config)`, `Snapshotter.Snapshot(ctx)` | The same list for callers that ask repeatedly; a reused `Snapshotter` keeps file caches. |
-| `Session` | Harness, version, session ID, PID, working directory, name, start time, last activity, subagent flag, transcript path, state, and Claude Code entrypoint. Times are Unix milliseconds. Claude Code subagents are not listed: their transcripts remain after they finish. |
-| `Config` | Choose harnesses, paths, intervals, process discovery, and logger. |
-| `Event` | Embed `agent-parser.ParsedEvent` and add `Harness`, `HarnessVersion`, `SessionID`, `SubagentID`, and `PID`. |
-| `Handler` | Accept events and optional acknowledgements; return an error to apply backpressure. |
-| `scanner.LocateClaudeTranscript(sessionID, cwd, projectsDir)` | Find the transcript of a Claude Code session that may no longer be running; a snapshot does not list a dead session. |
-| `scanner` and `tailer` packages | Access lower-level discovery, process snapshots, cursor stores, and filesystem tailers. |
+| `run(&CancellationToken, Config, Handler)` | Observe sessions asynchronously and return `io::Result<()>`. |
+| `snapshot(&CancellationToken, Config)` | List live sessions, sorted by harness and session ID, alongside any discovery errors. |
+| `Snapshotter::new(Config)` | Reuse discovery caches across live snapshots. |
+| `Event` | Flatten `agent-parser` activity fields into serialized events with harness and session identity. |
+| `Acknowledgement::acknowledge()` | Confirm delivery; cloned callbacks share checkpoint state. |
+| `scanner` | Access native process snapshots, harness discovery, timestamp extraction, and persisted session tracking. |
+| `tailer` | Access byte cursors, filesystem subscriptions, and explicit or automatic line acknowledgement. |
+| `transcript::TranscriptReader` | Parse lines with backpressure and whole-line acknowledgements. |
+| `checkpoint::CheckpointStore` | Reserve and acknowledge database revisions. |
+| `opencode::OpencodeReader` | Deliver transactional read-only database snapshots. |
 
-# Session state
+# Compatibility
 
-`Session.State` is `working`, `waiting`, `idle`, or `unknown`. A live session in an unknown state is still running.
+Native file identities use Unix device and inode numbers; other platforms fall back to paths and prefix/size checks. Replacement detection is consequently weaker outside Unix. Paths persisted as JSON must be representable as Unicode. Native process and file notification behavior is verified on Linux; live harness installations and other platforms require separate verification.
 
-| Harness | Source |
-| :--- | :--- |
-| Claude Code | The session file's undocumented `status`, measured on 2.1.310: `busy` is working, `waiting` is a pending approval, `idle` is idle. Any other value is unknown, including `shell`, whose meaning is not established. |
-| Codex | The last turn boundary in the rollout: `task_started` is working, `task_complete` and `turn_aborted` are idle. A turn older than the process belongs to a run that died and was resumed, so it counts as idle. No boundary in the last 32 MiB is unknown. Rollouts carry no approval events, so a turn waiting on one reads as working. |
-| Pi, OpenCode | Not recorded, so always unknown. |
+Malformed checkpoint and session-state JSON returns an error. Inferred Claude transcript and subagent paths reject session identifiers containing path separators. Timestamp scanning rejects non-finite numbers and resumes after oversized records only at a newline boundary. Cursor timestamp refreshes are persisted even when the offset stays unchanged.
 
-Headless Claude Code sessions report `kind: interactive`; identify them by `Entrypoint == "sdk-cli"`.
+OpenCode emits the shared `turn_start`, `agent_message`, and `tool_call` event names. Existing acknowledgements for these database revisions stay valid after upgrading.
 
-# Configuration
+Session lifecycle state is a JSON array of tracked sessions, ordered by harness and session ID. Those two fields form the identity: equal session IDs in different harnesses remain separate across restarts and exits. Duplicate identities are rejected. The Rust session-state format is independent of the Go tracker's map format.
 
-Explicit paths take precedence over environment-based defaults.
-
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `Harnesses` | All five harnesses | Select `HarnessClaudeCode`, `HarnessPi`, `HarnessCodex`, `HarnessOpencode`, or `HarnessAgy`. |
-| `ScanInterval` | `2s` | Discovery and database polling interval. |
-| `ClaudeSessionsDirs` | Harness defaults | `$CLAUDE_SESSIONS_DIR`, ai-registry session storage under `$XDG_DATA_HOME` or `~/.local/share`, `$CLAUDE_CONFIG_DIR/sessions`, and `~/.claude/sessions`. |
-| `ClaudeProjectsDir` | Harness defaults | Transcript lookup checks `$CLAUDE_PROJECTS_DIR`, ai-registry project storage, `$CLAUDE_CONFIG_DIR/projects`, and `~/.claude/projects`. |
-| `PiSessionsDir` | Harness defaults | `$PI_SESSIONS_DIR`, `$PI_CODING_AGENT_DIR/sessions`, or `~/.pi/agent/sessions`. |
-| `CodexSessionsDir` | Harness defaults | `$CODEX_SESSIONS_DIR`, `$CODEX_HOME/sessions`, or `~/.codex/sessions`. |
-| `OpencodeDBPath` | Harness defaults | `$OPENCODE_DB_PATH`, `$XDG_DATA_HOME/opencode/opencode.db`, or `~/.local/share/opencode/opencode.db`. |
-| `CursorPath` | Cache path above | Acknowledged JSONL byte cursors. |
-| `OpencodeCheckpointPath` | Resolved `CursorPath` + `.opencode` | Acknowledged OpenCode event revisions. |
-| `SessionStatePath` | Cache path above | Last known running sessions for exit detection across restarts. |
-| `CursorRetention` | `24h` | Retain cursors for inaccessible transcripts for this long. Existing transcripts with matching device and inode keep their cursors regardless of age; deleted or replaced files are pruned. |
-| `CursorPruneInterval` | `1h` | Period between cursor pruning passes. |
-| `CursorFlushInterval` | `2s` | Period between transcript and database checkpoint flushes. |
-| `ProcessSnapshotProvider` | Live process discovery | Supply process snapshots for embedded applications or tests. |
-| `StartAtEnd` | `false` | Skip what the sessions running when `Run` starts have already written, so a live view does not replay their history. A saved cursor still wins, and sessions that appear later are read from the start. A session resumed after `Run` starts counts as new. |
-| `SessionFilter` | All sessions | Limit `Run` to the sessions this returns true for, such as those in one directory. Each concurrent `Run` still needs its own paths. |
-| `Logger` | `slog.Default()` | Receive structured logs with concise snake_case messages. |
-
-Nonpositive durations use their defaults. Missing harness storage produces no sessions.
+Native watch registration and removal release subscription state before waiting for the notifier thread, so incoming file events can finish while watches change.
 
 # License
 

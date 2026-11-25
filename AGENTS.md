@@ -1,62 +1,34 @@
 ---
-created_on: 2026-10-02 15:48
-last_modified: 2026-10-02 21:21
+created_on: 2026-10-14 13:35
+last_modified: 2026-10-14 13:35
 status: current
 ---
 
 # agent-watcher
 
-Reusable Go discovery, lifecycle, transcript/database watching, and `agent-parser` event delivery. `agent-status` consumes the library and owns telemetry formatting, git workspace resolution, and WebSocket delivery.
+Reusable Rust session discovery, lifecycle observation, and acknowledged transcript/database delivery. Consumers own telemetry, UI, and network delivery. Read the parent agent instructions and applicable skills before changing code.
 
 ## Commands
 
-- Install dependencies: `go mod download`
-- Test: `just test` (race detector and >=90% statement coverage per package)
-- Lint: `just lint` (gofmt check, module hygiene, vet, golangci-lint)
-- All checks: `just check`
-- Format: `just fmt`
-- Linter: `golangci-lint` v2.13.2, matching the pinned CI version.
+- Build: `just build`.
+- Behavioral tests and doctests: `just test`.
+- Format this package: `just fmt`.
+- Format check and strict Clippy: `just lint`.
+- At least 90% line coverage: `just coverage`.
+- All checks: `just check`.
 
-## Conventions
+## Contracts
 
-- Read applicable skills before writing code; use Go 1.26.2+ conventions.
-- `watcher.Run` owns workers and joins them on cancellation. Handlers may run concurrently and must respect their context.
-- `Config.StartAtEnd` skips history only in the first scan, so sessions that appear later lose nothing. `Config.SessionFilter` drops active sessions before reconcile and keeps ended ones, which reconcile drains.
-- OpenCode test fixtures use WAL with a busy timeout, like real databases. A rollback journal lets a reader's lock fail the writer with `SQLITE_BUSY`.
-- `Snapshot` and `Snapshotter` share `discovery` with `Run` and never touch cursors, tailers, or the session tracker. Page actions and other one-shot callers use them, not `Run`.
-- `scanner/` discovers sessions with one shared process snapshot per tick; `tailer/` owns filesystem watches and byte cursors. Keep event parsing in `agent-parser`.
-- Transcript acknowledgement represents every event in one source line. Commit only a contiguous acknowledged prefix and bind callbacks to the file generation to reject acknowledgements from replaced files.
-- Cursor pruning preserves existing transcripts with matching device and inode regardless of age; remove checkpoints for deleted or replaced files. Age retention applies to inaccessible files.
-- OpenCode message watching is part of this library: use `agent-parser`'s read-only database API, emit changed message/part events, and checkpoint database revisions separately from transcript byte offsets. Drain final messages before emitting exit.
-- OpenCode child sessions share their parent's process. Completed assistant usage is checkpointed once per message, including across restart.
-- Logger injection uses `*slog.Logger`; messages are concise snake_case actions. Consumers choose output formatting.
-- Tests fake processes with `Config.ProcessSnapshotProvider`, `SetProcessSnapshotProvider`, or a process finder; production code has no environment override.
-
-## Gotchas
-
-- Each concurrent watcher requires separate cursor, database checkpoint, and session-state paths; there is no inter-process checkpoint locking.
-- Accepted but unacknowledged events remain pending in memory and replay on restart. Returning an error makes delivery retry; do not acknowledge a rejected event.
-- Claude Code compaction can replace or truncate transcripts. Keep directory watches and file-generation checks intact.
-- `Run` logs runtime read/persistence failures and retries where possible; initialization failures return errors. A handler that ignores cancellation can prevent shutdown.
-- Consumers use tagged GitHub module versions. Keep local workspace overrides optional; consumers must build and test without a sibling checkout.
-
-## Boundaries
-
-- Always: automatically record new user instructions in the appropriate `AGENTS.md`, checking conflicts with the user.
-- Always: functional code changes require behavioral test changes, red/green verification, and >=90% statement coverage per package. Temporarily disable the change and verify its regression test fails before completing work.
-- Always: keep the full watching pipeline reusable; do not import `agent-status` or add application telemetry/transport contracts.
-- Always: publish the extracted library through GitHub and integrate tagged versions into `agent-status`. Cut tagged releases whenever consumers need landed changes; no separate authorization is required.
-- Always: use `rg` or codegraph; keep scratch files under `.tmp`; never use heredocs.
-- Ask first: changing existing transcript cursor storage or application wire protocols.
-- Never: write to, lock, mutate, or delete harness logs or databases; parse or transmit credentials.
-- Never: modify or stage unrelated concurrent changes.
-
-## References
-
-- Public entry point and contract: `watcher.go`
-- Discovery and lifecycle: `discovery.go`, `scanner/`
-- One-shot session lists: `snapshot.go`
-- Transcript delivery and checkpoints: `transcript.go`, `delivery.go`, `tailer/`
-- Database delivery and checkpoints: `opencode.go`, `checkpoint.go`
-- Parser and canonical harness schemas: `github.com/alexgorbatchev/agent-parser`
-- Consumer integration: `github.com/alexgorbatchev/agent-status`, `packages/agent-observer/cmd/air-observer/main.go`
+- Keep parsing in `agent-parser`. Use its read-only OpenCode API and transactional snapshots.
+- Capture one shared process snapshot per discovery tick; inspect harness storage without modifying or locking it.
+- The runtime owns its workers and joins them before returning on cancellation. Concurrent handlers must honor their cancellation token.
+- An acknowledgement on the last event from a transcript line confirms the entire line. Commit only a contiguous acknowledged prefix, binding each callback to its file generation.
+- Replacement and truncation begin a new generation. Load persisted byte offsets only at initial attachment; never resurrect a previous generation's cursor during an in-memory reset.
+- Keep separate OpenCode revision checkpoints. Preserve checkpoint identities when renaming delivered events. Emit completion usage only after a completion marker, once per acknowledged assistant message across restarts. Drain final database activity before lifecycle exit.
+- Preserve existing transcripts with matching device and inode regardless of checkpoint age. Prune deleted/replaced files; apply age retention to inaccessible files.
+- Use native structured tracing. Return initialization failures, report runtime failures, and preserve retriable progress. Report corrupt state rather than silently replacing it.
+- Each concurrent runtime requires separate state paths; there is no inter-process checkpoint locking. Use random atomic temporary files for persistence.
+- Keep byte-cursor and wire schemas synchronized with their consumers. Read existing persisted fixtures before modifying formats.
+- Accepted, unacknowledged events remain pending and replay after restart. A rejected event must not be acknowledged.
+- Use injectable process snapshots in tests rather than a global environment bypass of process verification.
+- Keep all fixtures, evidence, and temporary files inside this project's `.tmp/`; never read unrelated credentials or mutate real harness sessions in tests.
