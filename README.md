@@ -1,7 +1,5 @@
 `agent-watcher` discovers Claude Code, Pi, Codex, OpenCode, and Antigravity sessions and delivers lifecycle and parsed activity events to Rust applications. Consumers choose their storage, display, and delivery policy, then acknowledge events after delivery succeeds.
 
-The Go implementation is deprecated. See the [`go-legacy` branch](https://github.com/alexgorbatchev/agent-watcher/tree/go-legacy) for its source. Existing Go release tags remain available.
-
 # What It Does
 
 - **Session discovery**: Match session files and database records to running harness processes, including child sessions and Claude Code subagent transcripts.
