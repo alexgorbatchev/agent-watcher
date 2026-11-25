@@ -4,6 +4,7 @@ use agent_watcher::{
     checkpoint::CheckpointStore,
     opencode::{OpencodeReader, opencode_message_events},
 };
+use sha2::{Digest, Sha256};
 use std::{
     io,
     sync::{
@@ -61,7 +62,7 @@ fn provisional_usage_is_suppressed_and_terminal_errors_survive_later_parts() {
     let text = part("text", r#"{"type":"text","text":"draft"}"#, 200);
     let events = opencode_message_events(&session(), &provisional, std::slice::from_ref(&text));
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].parsed.event_type, "text");
+    assert_eq!(events[0].parsed.event_type, "agent_message");
     assert!(!events[0].immutable);
     let completed = message(
         r#"{"role":"assistant","tokens":{"input":5},"finish":"error","time":{"completed":150},"error":{"message":"terminal"}}"#,
@@ -115,6 +116,94 @@ fn provisional_usage_is_suppressed_and_terminal_errors_survive_later_parts() {
     );
 }
 #[tokio::test]
+async fn renamed_opencode_events_preserve_acknowledged_checkpoints() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let temp = tempfile::tempdir_in(".tmp").unwrap();
+    let path = temp.path().join("checkpoint");
+    let store = Arc::new(CheckpointStore::open(&path).unwrap());
+    let mut user = message(r#"{"role":"user"}"#);
+    user.id = "user".into();
+    let mut prompt = part("prompt", r#"{"type":"text","text":"request"}"#, 130);
+    prompt.message_id.clone_from(&user.id);
+    let assistant = message(r#"{"role":"assistant"}"#);
+    let response = part("response", r#"{"type":"text","text":"reply"}"#, 150);
+    let tool = part(
+        "tool",
+        r#"{"type":"tool","tool":"bash","callID":"call","state":{"status":"running","input":{"command":"pwd"}}}"#,
+        170,
+    );
+    for (message, parts) in [
+        (&user, std::slice::from_ref(&prompt)),
+        (&assistant, &[response.clone(), tool.clone()][..]),
+    ] {
+        for event in opencode_message_events(&session(), message, parts) {
+            let mut legacy = event.parsed;
+            let (key, kind) = match legacy.event_type.as_str() {
+                "turn_start" => ("s:message:user:user_prompt", "user_prompt"),
+                "agent_message" => ("s:part:response:text", "text"),
+                "tool_call" => ("s:part:tool:tool_use", "tool_use"),
+                other => panic!("unexpected event {other}"),
+            };
+            legacy.event_type = kind.into();
+            let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+            store
+                .reserve(key, &hash, false)
+                .unwrap()
+                .unwrap()
+                .acknowledgement
+                .acknowledge()
+                .unwrap();
+        }
+    }
+    store.flush().unwrap();
+    let reader = OpencodeReader::new(
+        temp.path().join("db"),
+        Arc::new(CheckpointStore::open(path).unwrap()),
+    );
+    let cancel = CancellationToken::new();
+    let reject_replay: Handler = Arc::new(|_, event, _| {
+        Box::pin(async move { panic!("acknowledged event replayed: {}", event.parsed.event_type) })
+    });
+    reader
+        .deliver_snapshot(
+            &cancel,
+            &base(),
+            OpencodeSessionSnapshot {
+                session: session(),
+                messages: vec![user, assistant.clone()],
+                parts: vec![prompt, response, tool],
+            },
+            &reject_replay,
+        )
+        .await
+        .unwrap();
+    let delivered = Arc::new(AtomicBool::new(false));
+    let accept_revision: Handler = {
+        let delivered = delivered.clone();
+        Arc::new(move |_, event, ack| {
+            let delivered = delivered.clone();
+            Box::pin(async move {
+                assert_eq!(event.parsed.event_type, "agent_message");
+                assert_eq!(event.parsed.data.content.as_deref(), Some("revised"));
+                delivered.store(true, Ordering::SeqCst);
+                ack.unwrap().acknowledge()
+            })
+        })
+    };
+    let revised = part("response", r#"{"type":"text","text":"revised"}"#, 150);
+    reader
+        .deliver_snapshot(
+            &cancel,
+            &base(),
+            snapshot(assistant, vec![revised]),
+            &accept_revision,
+        )
+        .await
+        .unwrap();
+    assert!(delivered.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn revisions_retry_pending_replay_and_completed_usage_persist() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("checkpoint");
@@ -137,7 +226,7 @@ async fn revisions_retry_pending_replay_and_completed_usage_persist() {
                     return Err(io::Error::other("backpressure"));
                 }
                 events.lock().unwrap().push(event.clone());
-                if event.parsed.event_type == "text" {
+                if event.parsed.event_type == "agent_message" {
                     *saved_ack.lock().unwrap() = ack;
                 } else if let Some(ack) = ack {
                     ack.acknowledge()?;

@@ -435,7 +435,7 @@ async fn final_database_events_replay_after_restart_until_acknowledged() {
     db.execute_batch("INSERT INTO message VALUES('m','session',3,'{\"role\":\"assistant\"}');INSERT INTO part VALUES('p','m','session',3,'{\"type\":\"text\",\"text\":\"draft\"}');").unwrap();
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let (token, worker) = start(cfg.clone(), collect(sender, false));
-    event(&mut receiver, "text").await;
+    event(&mut receiver, "agent_message").await;
     db.execute_batch("UPDATE message SET data='{\"role\":\"assistant\",\"finish\":\"stop\",\"tokens\":{\"input\":7}}';").unwrap();
     active.store(false, Ordering::SeqCst);
     event(&mut receiver, "turn_end").await;

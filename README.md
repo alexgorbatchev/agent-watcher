@@ -121,6 +121,8 @@ Native file identities use Unix device and inode numbers; other platforms fall b
 
 Malformed checkpoint and session-state JSON returns an error. Inferred Claude transcript and subagent paths reject session identifiers containing path separators. Timestamp scanning rejects non-finite numbers and resumes after oversized records only at a newline boundary. Cursor timestamp refreshes are persisted even when the offset stays unchanged.
 
+OpenCode emits the shared `turn_start`, `agent_message`, and `tool_call` event names. Existing acknowledgements for these database revisions stay valid after upgrading.
+
 Session lifecycle state is a JSON array of tracked sessions, ordered by harness and session ID. Those two fields form the identity: equal session IDs in different harnesses remain separate across restarts and exits. Duplicate identities are rejected. The Rust session-state format is independent of the Go tracker's map format.
 
 Native watch registration and removal release subscription state before waiting for the notifier thread, so incoming file events can finish while watches change.

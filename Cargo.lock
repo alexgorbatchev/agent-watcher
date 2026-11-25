@@ -5,10 +5,10 @@ version = 4
 [[package]]
 name = "agent-parser"
 version = "0.1.0"
-source = "git+https://github.com/alexgorbatchev/agent-parser-rust.git?rev=dab13ad3920b6e3823f5ef44be38280e3e98f220#dab13ad3920b6e3823f5ef44be38280e3e98f220"
+source = "git+https://github.com/alexgorbatchev/agent-parser-rust.git?rev=201822cbf57aa5684088ae0fcbc3b1713dffa9e6#201822cbf57aa5684088ae0fcbc3b1713dffa9e6"
 dependencies = [
+ "base64",
  "chrono",
- "go-parse-duration",
  "prost",
  "regex",
  "rusqlite",
@@ -71,6 +71,12 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
@@ -311,12 +317,6 @@ dependencies = [
  "libc",
  "r-efi",
 ]
-
-[[package]]
-name = "go-parse-duration"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "558b88954871f5e5b2af0e62e2e176c8bde7a6c2c4ed41b13d138d96da2e2cbd"
 
 [[package]]
 name = "hashbrown"

@@ -169,7 +169,7 @@ async fn harness_dispatch_and_cancellation() {
         ),
         (
             Harness::Codex,
-            r#"{"type":"event_msg","payload":{"type":"user_message","message":"codex"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex"}]}}"#,
         ),
     ] {
         TranscriptReader::new(base(harness))

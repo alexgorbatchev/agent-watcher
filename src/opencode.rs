@@ -22,6 +22,30 @@ pub struct DatabaseEvent {
     pub key: String,
     pub immutable: bool,
 }
+
+// These names are part of the persisted revision identity. Keep the spelling
+// that earlier clients acknowledged, including inside the serialized hash.
+fn previous_checkpoint_type(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "turn_start" => Some("user_prompt"),
+        "agent_message" => Some("text"),
+        "tool_call" => Some("tool_use"),
+        _ => None,
+    }
+}
+
+impl DatabaseEvent {
+    fn checkpoint_fingerprint(&mut self) -> io::Result<String> {
+        let event_type = previous_checkpoint_type(&self.parsed.event_type)
+            .map(|legacy| std::mem::replace(&mut self.parsed.event_type, legacy.into()));
+        let encoded = serde_json::to_vec(&self.parsed);
+        if let Some(event_type) = event_type {
+            self.parsed.event_type = event_type;
+        }
+        Ok(format!("{:x}", Sha256::digest(encoded?)))
+    }
+}
+
 pub fn opencode_message_events(
     record: &OpencodeSession,
     message: &OpencodeMessage,
@@ -30,8 +54,9 @@ pub fn opencode_message_events(
     let mut events = Vec::new();
     let mut append = |key: String, immutable, parsed: ParsedEvent| {
         if parsed.event_type != "run_started" {
+            let kind = previous_checkpoint_type(&parsed.event_type).unwrap_or(&parsed.event_type);
             events.push(DatabaseEvent {
-                key: format!("{key}:{}", parsed.event_type),
+                key: format!("{key}:{kind}"),
                 immutable,
                 parsed,
             });
@@ -201,15 +226,14 @@ impl OpencodeReader {
                 .get(message.id.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            for parsed in opencode_message_events(&snapshot.session, message, parts) {
+            for mut parsed in opencode_message_events(&snapshot.session, message, parts) {
                 if cancel.is_cancelled() {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "database delivery cancelled",
                     ));
                 }
-                let fingerprint =
-                    format!("{:x}", Sha256::digest(serde_json::to_vec(&parsed.parsed)?));
+                let fingerprint = parsed.checkpoint_fingerprint()?;
                 let Some(reservation) = self.checkpoints.reserve(
                     &format!("{}:{}", session.session_id, parsed.key),
                     &fingerprint,
