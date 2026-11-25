@@ -1,19 +1,20 @@
 //! Lifecycle runtime. Every spawned transcript worker is joined at shutdown.
 use crate::{
-    Acknowledgement,
+    Acknowledgement, SessionSnapshot,
     checkpoint::CheckpointStore,
+    discovery::Discovery,
     opencode::OpencodeReader,
     scanner::*,
     tailer::{CursorStore, DeliveryMode, Tailer, WatcherRegistry, default_cursor_path},
     transcript::TranscriptReader,
 };
-use agent_parser::{EventData, ParsedEvent};
+use agent_parser::{EventData, ParsedEvent, claude_code_activity_timestamp};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -31,15 +32,23 @@ pub enum Harness {
     Codex,
     #[serde(rename = "opencode")]
     Opencode,
+    #[serde(rename = "agy")]
+    Agy,
 }
-impl std::fmt::Display for Harness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl Harness {
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::ClaudeCode => "claude-code",
             Self::Pi => "pi",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
-        })
+            Self::Agy => "agy",
+        }
+    }
+}
+impl std::fmt::Display for Harness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 impl std::str::FromStr for Harness {
@@ -50,6 +59,7 @@ impl std::str::FromStr for Harness {
             "pi" => Ok(Self::Pi),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::Opencode),
+            "agy" => Ok(Self::Agy),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported harness: {value}"),
@@ -70,6 +80,7 @@ pub struct Event {
     pub pid: i32,
 }
 pub type HandlerFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+pub type SessionFilter = Arc<dyn Fn(&SessionSnapshot) -> bool + Send + Sync>;
 pub type Handler = Arc<
     dyn for<'a> Fn(&'a CancellationToken, Event, Option<Acknowledgement>) -> HandlerFuture<'a>
         + Send
@@ -84,6 +95,9 @@ pub struct Config {
     pub pi_sessions_dir: PathBuf,
     pub codex_sessions_dir: PathBuf,
     pub opencode_db_path: PathBuf,
+    pub agy_sessions_dir: PathBuf,
+    pub start_at_end: bool,
+    pub session_filter: Option<SessionFilter>,
     pub cursor_path: PathBuf,
     pub opencode_checkpoint_path: PathBuf,
     pub session_state_path: PathBuf,
@@ -100,6 +114,7 @@ impl Default for Config {
                 Harness::Pi,
                 Harness::Codex,
                 Harness::Opencode,
+                Harness::Agy,
             ],
             scan_interval: Duration::from_secs(2),
             claude_sessions_dirs: Vec::new(),
@@ -107,6 +122,9 @@ impl Default for Config {
             pi_sessions_dir: PathBuf::new(),
             codex_sessions_dir: PathBuf::new(),
             opencode_db_path: PathBuf::new(),
+            agy_sessions_dir: PathBuf::new(),
+            start_at_end: false,
+            session_filter: None,
             cursor_path: PathBuf::new(),
             opencode_checkpoint_path: PathBuf::new(),
             session_state_path: PathBuf::new(),
@@ -117,13 +135,21 @@ impl Default for Config {
         }
     }
 }
+impl Config {
+    pub(crate) fn apply_discovery_defaults(&mut self) {
+        if self.harnesses.is_empty() {
+            self.harnesses = Self::default().harnesses;
+        }
+        if self.opencode_db_path.as_os_str().is_empty() {
+            self.opencode_db_path = default_opencode_db_path();
+        }
+    }
+}
 #[derive(Clone)]
 pub(crate) struct Session {
     pub event: Event,
-    pub path: PathBuf,
-    pub started_at: i64,
     pub active: bool,
-    pub subagents: Vec<SubagentTranscript>,
+    pub snapshot: SessionSnapshot,
 }
 struct ActiveTail {
     tailer: Arc<Tailer>,
@@ -138,10 +164,8 @@ pub(crate) struct Runner {
     pub checkpoints: Arc<CheckpointStore>,
     pub tracker: SessionTracker,
     pub registry: Arc<WatcherRegistry>,
-    pub claude: ClaudeCodeScanner,
-    pub pi: PiScanner,
-    pub codex: CodexScanner,
-    pub opencode: OpencodeScanner,
+    pub discovery: Discovery,
+    pub initial_scan: bool,
     pub active: BTreeMap<Harness, BTreeMap<String, Session>>,
     tails: BTreeMap<PathBuf, ActiveTail>,
     subagents: BTreeSet<(String, String)>,
@@ -159,9 +183,7 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
         ));
     }
     let defaults = Config::default();
-    if cfg.harnesses.is_empty() {
-        cfg.harnesses = defaults.harnesses;
-    }
+    cfg.apply_discovery_defaults();
     cfg.scan_interval = positive(cfg.scan_interval, defaults.scan_interval);
     cfg.cursor_retention = positive(cfg.cursor_retention, defaults.cursor_retention);
     cfg.cursor_prune_interval = positive(cfg.cursor_prune_interval, defaults.cursor_prune_interval);
@@ -177,22 +199,13 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
     if cfg.session_state_path.as_os_str().is_empty() {
         cfg.session_state_path = default_session_tracker_path();
     }
-    if cfg.opencode_db_path.as_os_str().is_empty() {
-        cfg.opencode_db_path = default_opencode_db_path();
-    }
     let cursors = Arc::new(CursorStore::open(&cfg.cursor_path)?);
     let checkpoints = Arc::new(CheckpointStore::open(&cfg.opencode_checkpoint_path)?);
     let tracker = SessionTracker::open(cfg.session_state_path.clone())?;
     let registry = WatcherRegistry::new()?;
-    let mut claude = ClaudeCodeScanner::new(cfg.claude_sessions_dirs.clone());
-    if !cfg.claude_projects_dir.as_os_str().is_empty() {
-        claude.set_projects_dirs(vec![cfg.claude_projects_dir.clone()]);
-    }
     let mut runner = Runner {
-        claude,
-        pi: PiScanner::new(cfg.pi_sessions_dir.clone()),
-        codex: CodexScanner::new(cfg.codex_sessions_dir.clone()),
-        opencode: OpencodeScanner::new(cfg.opencode_db_path.clone()),
+        discovery: Discovery::new(&cfg),
+        initial_scan: true,
         cfg,
         handler,
         cursors,
@@ -213,6 +226,21 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
         let Ok(harness) = tracked.harness.parse::<Harness>() else {
             continue;
         };
+        let snapshot = SessionSnapshot {
+            harness,
+            harness_version: tracked.harness_version.clone(),
+            session_id: tracked.session_id.clone(),
+            pid: tracked.pid,
+            cwd: tracked.cwd.clone(),
+            name: String::new(),
+            started_at: tracked.started_at,
+            last_activity: 0,
+            subagent: false,
+            transcript_path: PathBuf::new(),
+            state: SessionState::Unknown,
+            state_updated_at: 0,
+            entrypoint: String::new(),
+        };
         runner.active.entry(harness).or_default().insert(
             tracked.session_id.clone(),
             Session {
@@ -227,10 +255,8 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
                     subagent_id: None,
                     pid: tracked.pid,
                 },
-                path: PathBuf::new(),
-                started_at: tracked.started_at,
                 active: true,
-                subagents: Vec::new(),
+                snapshot,
             },
         );
     }
@@ -252,6 +278,7 @@ pub async fn run(cancel: &CancellationToken, mut cfg: Config, handler: Handler) 
         } }
     });
     runner.scan(&owned).await;
+    runner.initial_scan = false;
     let mut scans = tokio::time::interval(runner.cfg.scan_interval);
     scans.tick().await;
     loop {
@@ -301,25 +328,27 @@ impl Runner {
         event.parsed.event_type = kind.into();
         (self.handler)(cancel, event, None).await
     }
-    pub fn attach(&mut self, cancel: &CancellationToken, session: &Session) {
-        if session.path.as_os_str().is_empty() || self.tails.contains_key(&session.path) {
+    pub fn attach(&mut self, cancel: &CancellationToken, path: &Path, event: Event) {
+        if path.as_os_str().is_empty() || self.tails.contains_key(path) {
             return;
         }
         let tailer = match Tailer::new(
-            &session.path,
+            path,
             self.cursors.clone(),
             self.registry.clone(),
             DeliveryMode::Explicit,
         ) {
-            Ok(tailer) => Arc::new(tailer),
+            Ok(tailer) => {
+                Arc::new(tailer.with_start_at_end(self.initial_scan && self.cfg.start_at_end))
+            }
             Err(error) => {
                 tracing::warn!(action="tailer_attach_failed",%error);
                 return;
             }
         };
-        let reader = Arc::new(tokio::sync::Mutex::new(TranscriptReader::new(
-            session.event.clone(),
-        )));
+        let harness = event.harness;
+        let session_id = event.session_id.clone();
+        let reader = Arc::new(tokio::sync::Mutex::new(TranscriptReader::new(event)));
         let token = cancel.child_token();
         let worker_token = token.clone();
         let handler = self.handler.clone();
@@ -338,12 +367,12 @@ impl Runner {
             }
         });
         self.tails.insert(
-            session.path.clone(),
+            path.to_owned(),
             ActiveTail {
                 tailer,
                 cancel: token,
-                session_id: session.event.session_id.clone(),
-                harness: session.event.harness,
+                session_id,
+                harness,
             },
         );
     }
@@ -359,34 +388,53 @@ impl Runner {
         self.subagents.retain(|(parent, _)| parent != session_id);
     }
     pub async fn attach_subagents(&mut self, cancel: &CancellationToken, parent: &Session) {
-        for sub in &parent.subagents {
-            let mut session = parent.clone();
-            session.path = sub.path.clone();
-            session.event.subagent_id = Some(sub.subagent_id.clone());
-            session.event.parsed.data = EventData::default();
+        if parent.event.harness != Harness::ClaudeCode {
+            return;
+        }
+        let subagents = match discover_claude_subagents(
+            &parent.event.session_id,
+            &parent.snapshot.transcript_path,
+        ) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(action="subagent_scan_failed",%error);
+                return;
+            }
+        };
+        for sub in subagents {
+            let mut event = parent.event.clone();
+            event.subagent_id = Some(sub.subagent_id.clone());
+            event.parsed.data = EventData::default();
             let key = (parent.event.session_id.clone(), sub.subagent_id.clone());
             if !self.subagents.contains(&key) {
                 let now = chrono::Utc::now().timestamp_millis();
-                session.event.parsed.timestamp = extract_first_timestamp(&sub.path)
-                    .ok()
-                    .filter(|time| *time > 0 && *time < now)
-                    .unwrap_or(now)
-                    .max(parent.started_at);
-                if let Err(error) = self
-                    .lifecycle(cancel, session.event.clone(), "run_started")
-                    .await
-                {
+                event.parsed.timestamp =
+                    first_native_activity(cancel, &sub.path, claude_code_activity_timestamp)
+                        .ok()
+                        .filter(|time| *time > 0 && *time < now)
+                        .unwrap_or(now)
+                        .max(parent.snapshot.started_at);
+                if let Err(error) = self.lifecycle(cancel, event.clone(), "run_started").await {
                     tracing::warn!(action="subagent_lifecycle_failed",%error);
                     continue;
                 }
                 self.subagents.insert(key);
             }
-            self.attach(cancel, &session);
+            self.attach(cancel, &sub.path, event);
         }
     }
     pub async fn poll(&self, cancel: &CancellationToken, session: &Session) -> io::Result<()> {
         OpencodeReader::new(&self.cfg.opencode_db_path, self.checkpoints.clone())
             .poll(cancel, &session.event, &self.handler)
+            .await
+    }
+    pub async fn baseline_opencode(
+        &self,
+        cancel: &CancellationToken,
+        session: &Session,
+    ) -> io::Result<()> {
+        OpencodeReader::new(&self.cfg.opencode_db_path, self.checkpoints.clone())
+            .baseline(cancel, &session.event)
             .await
     }
 }

@@ -5,11 +5,13 @@ pub mod discovery;
 pub mod opencode;
 mod persistence;
 pub mod scanner;
+pub mod snapshot;
 pub mod tailer;
 pub mod transcript;
 pub mod watcher;
 
-pub use watcher::{Config, Event, Handler, HandlerFuture, Harness, run};
+pub use snapshot::{SessionSnapshot, SnapshotError, SnapshotResult, Snapshotter, snapshot};
+pub use watcher::{Config, Event, Handler, HandlerFuture, Harness, SessionFilter, run};
 
 use std::{io, sync::Arc};
 /// Confirms durable delivery. Clones refer to the same idempotent checkpoint.

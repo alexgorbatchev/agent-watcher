@@ -1,6 +1,6 @@
 use super::{
-    ProcessSnapshot, SessionDescriptor, check_cancel, default_claude_projects_dirs,
-    default_claude_session_dirs,
+    ProcessSnapshot, SessionDescriptor, SessionState, check_cancel, default_claude_projects_dirs,
+    default_claude_session_dirs, paths::claude_projects_dirs,
 };
 use serde::Deserialize;
 use std::{
@@ -26,6 +26,8 @@ struct DescriptorFile {
     session_id: String,
     cwd: PathBuf,
     status: String,
+    status_updated_at: i64,
+    entrypoint: String,
     transcript_path: PathBuf,
     started_at: i64,
     version: String,
@@ -53,6 +55,10 @@ impl ClaudeCodeScanner {
     }
     pub fn set_projects_dirs(&mut self, paths: Vec<PathBuf>) {
         self.projects_dirs = paths;
+    }
+    /// Search the explicit projects directory followed by the standard locations.
+    pub fn set_projects_dir(&mut self, path: &Path) {
+        self.projects_dirs = claude_projects_dirs(Some(path));
     }
     pub fn scan(
         &self,
@@ -89,6 +95,14 @@ impl ClaudeCodeScanner {
                     pid: raw.pid,
                     session_id: raw.session_id,
                     cwd: raw.cwd,
+                    state: match raw.status.as_str() {
+                        "busy" => SessionState::Working,
+                        "waiting" => SessionState::Waiting,
+                        "idle" => SessionState::Idle,
+                        _ => SessionState::Unknown,
+                    },
+                    state_updated_at: raw.status_updated_at,
+                    entrypoint: raw.entrypoint,
                     status: raw.status,
                     transcript_path: raw.transcript_path,
                     started_at: raw.started_at,
@@ -108,80 +122,91 @@ impl ClaudeCodeScanner {
         }
         Ok(result)
     }
-    fn locate_transcript(&self, id: &str, cwd: &Path) -> PathBuf {
-        if !safe_id(id) {
-            return PathBuf::new();
+    pub fn locate_transcript(&self, id: &str, cwd: &Path) -> PathBuf {
+        locate_transcript_in(id, cwd, &self.projects_dirs)
+    }
+    pub fn discover_subagents(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> io::Result<Vec<SubagentTranscript>> {
+        discover_claude_subagents(&descriptor.session_id, &descriptor.transcript_path)
+    }
+}
+
+/// Locate the transcript even when the session's process has exited.
+pub fn locate_claude_transcript(id: &str, cwd: &Path, projects_dir: Option<&Path>) -> PathBuf {
+    locate_transcript_in(id, cwd, &claude_projects_dirs(projects_dir))
+}
+
+fn locate_transcript_in(id: &str, cwd: &Path, projects_dirs: &[PathBuf]) -> PathBuf {
+    if !safe_id(id) {
+        return PathBuf::new();
+    }
+    let filename = format!("{id}.jsonl");
+    let roots: Vec<_> = projects_dirs
+        .iter()
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+    if !cwd.as_os_str().is_empty() {
+        let mut slug = cwd.to_string_lossy().replace(['/', '.'], "-");
+        if !slug.starts_with('-') {
+            slug.insert(0, '-')
         }
-        let filename = format!("{id}.jsonl");
-        let roots: Vec<_> = self
-            .projects_dirs
-            .iter()
-            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-            .collect();
-        if !cwd.as_os_str().is_empty() {
-            let mut slug = cwd.to_string_lossy().replace(['/', '.'], "-");
-            if !slug.starts_with('-') {
-                slug.insert(0, '-')
+        for root in &roots {
+            for slug in [&slug, slug.trim_start_matches('-')] {
+                let path = root.join(slug).join(&filename);
+                if path.is_file() {
+                    return path;
+                }
             }
-            for root in &roots {
-                for slug in [&slug, slug.trim_start_matches('-')] {
-                    let path = root.join(slug).join(&filename);
+        }
+    }
+    for root in roots {
+        if let Ok(entries) = listing(&root) {
+            for entry in entries {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    let path = entry.path().join(&filename);
                     if path.is_file() {
                         return path;
                     }
                 }
             }
         }
-        for root in roots {
-            if let Ok(entries) = listing(&root) {
-                for entry in entries {
-                    if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                        let path = entry.path().join(&filename);
-                        if path.is_file() {
-                            return path;
-                        }
-                    }
+    }
+    PathBuf::new()
+}
+pub(crate) fn discover_claude_subagents(
+    id: &str,
+    path: &Path,
+) -> io::Result<Vec<SubagentTranscript>> {
+    if path.as_os_str().is_empty() {
+        return Ok(Vec::new());
+    }
+    let directory = path.parent().unwrap_or(Path::new("."));
+    let mut roots = Vec::new();
+    if safe_id(id) {
+        roots.push(directory.join(id).join("subagents"));
+    }
+    roots.push(directory.join("subagents"));
+    let mut result = Vec::new();
+    for root in roots {
+        if let Ok(entries) = listing(&root) {
+            for entry in entries {
+                let path = entry.path();
+                if !entry.file_type().is_ok_and(|t| t.is_dir())
+                    && path.extension().is_some_and(|e| e == "jsonl")
+                {
+                    result.push(SubagentTranscript {
+                        subagent_id: path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        path,
+                    });
                 }
             }
         }
-        PathBuf::new()
     }
-    pub fn discover_subagents(
-        &self,
-        descriptor: &SessionDescriptor,
-    ) -> io::Result<Vec<SubagentTranscript>> {
-        if descriptor.transcript_path.as_os_str().is_empty() {
-            return Ok(Vec::new());
-        }
-        let directory = descriptor
-            .transcript_path
-            .parent()
-            .unwrap_or(Path::new("."));
-        let mut roots = Vec::new();
-        if safe_id(&descriptor.session_id) {
-            roots.push(directory.join(&descriptor.session_id).join("subagents"));
-        }
-        roots.push(directory.join("subagents"));
-        let mut result = Vec::new();
-        for root in roots {
-            if let Ok(entries) = listing(&root) {
-                for entry in entries {
-                    let path = entry.path();
-                    if !entry.file_type().is_ok_and(|t| t.is_dir())
-                        && path.extension().is_some_and(|e| e == "jsonl")
-                    {
-                        result.push(SubagentTranscript {
-                            subagent_id: path
-                                .file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            path,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(result)
-    }
+    Ok(result)
 }

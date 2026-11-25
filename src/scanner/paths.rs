@@ -37,17 +37,39 @@ pub fn default_claude_session_dirs() -> Vec<PathBuf> {
     let mut paths: Vec<_> = variable("CLAUDE_SESSIONS_DIR").into_iter().collect();
     paths.extend([
         data().join("ai-registry/claude-code/sessions"),
+        claude_config_dir().join("sessions"),
         home().join(".claude/sessions"),
     ]);
+    paths.dedup();
     paths
 }
 pub fn default_claude_projects_dirs() -> Vec<PathBuf> {
-    let mut paths: Vec<_> = variable("CLAUDE_PROJECTS_DIR").into_iter().collect();
+    claude_projects_dirs(None)
+}
+pub(super) fn claude_projects_dirs(override_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = override_dir
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| variable("CLAUDE_PROJECTS_DIR"))
+        .into_iter()
+        .collect();
     paths.extend([
         data().join("ai-registry/claude-code/projects"),
+        claude_config_dir().join("projects"),
         home().join(".claude/projects"),
     ]);
+    paths.dedup();
     paths
+}
+fn claude_config_dir() -> PathBuf {
+    variable("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home().join(".claude"))
+}
+pub fn default_agy_sessions_dir() -> PathBuf {
+    variable("AGY_SESSIONS_DIR").unwrap_or_else(|| {
+        variable("GEMINI_HOME")
+            .unwrap_or_else(|| home().join(".gemini"))
+            .join("antigravity-cli/brain")
+    })
 }
 pub fn default_pi_sessions_dir() -> PathBuf {
     variable("PI_SESSIONS_DIR").unwrap_or_else(|| {

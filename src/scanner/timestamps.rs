@@ -6,6 +6,7 @@ use std::{
     path::Path,
     time::UNIX_EPOCH,
 };
+use tokio_util::sync::CancellationToken;
 const CHUNK: usize = 256 * 1024;
 const MAX_LINE: usize = 8 * 1024 * 1024;
 const PRIMARY: &[&str] = &["timestamp", "created_at", "createdAt", "time", "date"];
@@ -142,12 +143,49 @@ fn extract(value: &Value, first: bool) -> Option<i64> {
 }
 /// Finds the final conversational timestamp with bounded reverse reads.
 pub fn extract_last_active_timestamp(path: &Path, fallback_mtime: i64) -> io::Result<i64> {
+    scan_backward(&CancellationToken::new(), path, 0, |line| {
+        let value = serde_json::from_slice::<Value>(line).ok()?;
+        conversation(&value)
+            .then(|| extract(&value, false))
+            .flatten()
+    })
+    .map(|found| found.unwrap_or(fallback_mtime))
+}
+
+type ActivityTimestamp = fn(&[u8]) -> Result<Option<i64>, agent_parser::Error>;
+
+pub(crate) fn last_native_activity(
+    cancel: &CancellationToken,
+    path: &Path,
+    parse: ActivityTimestamp,
+) -> io::Result<i64> {
+    super::check_cancel(cancel)?;
+    let fallback = mtime(&std::fs::metadata(path)?);
+    scan_backward(cancel, path, 0, |line| {
+        parse(line).ok().flatten().filter(|time| *time > 0)
+    })
+    .map(|found| found.unwrap_or(fallback))
+}
+
+pub(super) fn scan_backward<T>(
+    cancel: &CancellationToken,
+    path: &Path,
+    limit: u64,
+    visit: impl Fn(&[u8]) -> Option<T>,
+) -> io::Result<Option<T>> {
+    super::check_cancel(cancel)?;
     let mut file = File::open(path)?;
     let mut cursor = file.metadata()?.len();
+    let start = if limit == 0 {
+        0
+    } else {
+        cursor.saturating_sub(limit)
+    };
     let mut remainder = Vec::new();
     let mut oversized = false;
-    while cursor > 0 {
-        let length = usize::try_from(cursor.min(CHUNK as u64)).unwrap_or(CHUNK);
+    while cursor > start {
+        super::check_cancel(cancel)?;
+        let length = usize::try_from((cursor - start).min(CHUNK as u64)).unwrap_or(CHUNK);
         cursor -= length as u64;
         file.seek(SeekFrom::Start(cursor))?;
         let mut bytes = vec![0; length];
@@ -159,11 +197,8 @@ pub fn extract_last_active_timestamp(path: &Path, fallback_mtime: i64) -> io::Re
             if !oversized && suffix.len() + remainder.len() <= MAX_LINE {
                 let mut line = suffix.to_vec();
                 line.extend_from_slice(&remainder);
-                if let Ok(value) = serde_json::from_slice::<Value>(&line)
-                    && conversation(&value)
-                    && let Some(t) = extract(&value, false)
-                {
-                    return Ok(t);
+                if let Some(found) = visit(&line) {
+                    return Ok(Some(found));
                 }
             }
             oversized = false;
@@ -181,23 +216,43 @@ pub fn extract_last_active_timestamp(path: &Path, fallback_mtime: i64) -> io::Re
             }
         }
     }
-    if !oversized
-        && let Ok(value) = serde_json::from_slice::<Value>(&remainder)
-        && conversation(&value)
-        && let Some(t) = extract(&value, false)
-    {
-        return Ok(t);
-    }
-    Ok(fallback_mtime)
+    super::check_cancel(cancel)?;
+    Ok(if start == 0 && !oversized {
+        visit(&remainder)
+    } else {
+        None
+    })
 }
 /// Finds the first timestamped JSON record, including session metadata.
 pub fn extract_first_timestamp(path: &Path) -> io::Result<i64> {
+    scan_forward(&CancellationToken::new(), path, |line| {
+        extract(&serde_json::from_slice::<Value>(line).ok()?, true)
+    })
+}
+
+pub(crate) fn first_native_activity(
+    cancel: &CancellationToken,
+    path: &Path,
+    parse: ActivityTimestamp,
+) -> io::Result<i64> {
+    scan_forward(cancel, path, |line| {
+        parse(line).ok().flatten().filter(|time| *time > 0)
+    })
+}
+
+fn scan_forward(
+    cancel: &CancellationToken,
+    path: &Path,
+    visit: impl Fn(&[u8]) -> Option<i64>,
+) -> io::Result<i64> {
+    super::check_cancel(cancel)?;
     let file = File::open(path)?;
     let fallback = mtime(&file.metadata()?);
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut oversized = false;
     loop {
+        super::check_cancel(cancel)?;
         let available = reader.fill_buf()?;
         if available.is_empty() {
             break;
@@ -217,20 +272,14 @@ pub fn extract_first_timestamp(path: &Path) -> io::Result<i64> {
         }
         reader.consume(take);
         if complete {
-            if !oversized
-                && let Ok(v) = serde_json::from_slice::<Value>(&line)
-                && let Some(t) = extract(&v, true)
-            {
+            if !oversized && let Some(t) = visit(&line) {
                 return Ok(t);
             }
             line.clear();
             oversized = false;
         }
     }
-    if !oversized
-        && let Ok(v) = serde_json::from_slice::<Value>(&line)
-        && let Some(t) = extract(&v, true)
-    {
+    if !oversized && let Some(t) = visit(&line) {
         return Ok(t);
     }
     Ok(fallback)

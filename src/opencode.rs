@@ -111,6 +111,15 @@ impl OpencodeReader {
         self.deliver_snapshot(cancel, session, snapshot, handler)
             .await
     }
+    pub(crate) async fn baseline(
+        &self,
+        cancel: &CancellationToken,
+        session: &Event,
+    ) -> io::Result<()> {
+        let snapshot = self.snapshot(cancel, &session.session_id).await?;
+        self.dispatch_snapshot(cancel, session, snapshot, None)
+            .await
+    }
     async fn snapshot(
         &self,
         cancel: &CancellationToken,
@@ -161,8 +170,18 @@ impl OpencodeReader {
         &self,
         cancel: &CancellationToken,
         session: &Event,
-        mut snapshot: OpencodeSessionSnapshot,
+        snapshot: OpencodeSessionSnapshot,
         handler: &Handler,
+    ) -> io::Result<()> {
+        self.dispatch_snapshot(cancel, session, snapshot, Some(handler))
+            .await
+    }
+    async fn dispatch_snapshot(
+        &self,
+        cancel: &CancellationToken,
+        session: &Event,
+        mut snapshot: OpencodeSessionSnapshot,
+        handler: Option<&Handler>,
     ) -> io::Result<()> {
         snapshot
             .messages
@@ -197,6 +216,10 @@ impl OpencodeReader {
                     parsed.immutable,
                 )?
                 else {
+                    continue;
+                };
+                let Some(handler) = handler else {
+                    reservation.acknowledgement.acknowledge()?;
                     continue;
                 };
                 let mut event = session.clone();

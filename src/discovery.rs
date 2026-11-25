@@ -10,12 +10,40 @@ pub fn start_timestamp(started_at: i64, last_active: i64, now: i64) -> i64 {
 }
 
 use crate::{
+    Config, SessionSnapshot,
     scanner::*,
     watcher::{Event, Harness, Runner, Session},
 };
-use agent_parser::{EventData, ParsedEvent};
-use std::{collections::BTreeMap, io};
+use agent_parser::{EventData, ParsedEvent, claude_code_activity_timestamp};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+};
 use tokio_util::sync::CancellationToken;
+pub(crate) struct Discovery {
+    claude: ClaudeCodeScanner,
+    pi: PiScanner,
+    codex: CodexScanner,
+    opencode: OpencodeScanner,
+    agy: AgyScanner,
+}
+
+impl Discovery {
+    pub fn new(config: &Config) -> Self {
+        let mut claude = ClaudeCodeScanner::new(config.claude_sessions_dirs.clone());
+        if !config.claude_projects_dir.as_os_str().is_empty() {
+            claude.set_projects_dir(&config.claude_projects_dir);
+        }
+        Self {
+            claude,
+            pi: PiScanner::new(config.pi_sessions_dir.clone()),
+            codex: CodexScanner::new(config.codex_sessions_dir.clone()),
+            opencode: OpencodeScanner::new(config.opencode_db_path.clone()),
+            agy: AgyScanner::new(config.agy_sessions_dir.clone()),
+        }
+    }
+}
+
 impl Runner {
     pub async fn scan(&mut self, cancel: &CancellationToken) {
         let snapshot = match self.cfg.process_snapshot_provider.snapshot(cancel) {
@@ -29,7 +57,7 @@ impl Runner {
             if cancel.is_cancelled() {
                 break;
             }
-            match self.discover(cancel, harness, &snapshot) {
+            match self.discovery.discover(cancel, harness, &snapshot) {
                 Ok(sessions) => self.reconcile(cancel, harness, sessions).await,
                 Err(error) => tracing::warn!(action="session_scan_failed",%harness,%error),
             }
@@ -38,7 +66,9 @@ impl Runner {
             tracing::warn!(action="session_tracker_save_failed",%error);
         }
     }
-    fn discover(
+}
+impl Discovery {
+    pub fn discover(
         &mut self,
         cancel: &CancellationToken,
         harness: Harness,
@@ -49,57 +79,102 @@ impl Runner {
             Harness::Pi => self.pi.scan(cancel, snapshot)?,
             Harness::Codex => self.codex.scan(cancel, snapshot)?,
             Harness::Opencode => self.opencode.scan(cancel, snapshot)?,
+            Harness::Agy => self.agy.scan(cancel, snapshot)?,
         };
         let now = chrono::Utc::now().timestamp_millis();
-        Ok(descriptors
+        descriptors
             .into_iter()
             .map(|descriptor| {
+                if cancel.is_cancelled() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "session scan cancelled",
+                    ));
+                }
                 let mut last = descriptor.last_active;
                 let mut data = EventData::default();
-                let mut subagents = Vec::new();
                 if harness == Harness::ClaudeCode {
-                    last =
-                        extract_last_active_timestamp(&descriptor.transcript_path, 0).unwrap_or(0);
+                    last = last_native_activity(
+                        cancel,
+                        &descriptor.transcript_path,
+                        claude_code_activity_timestamp,
+                    )
+                    .unwrap_or(0);
+                    if cancel.is_cancelled() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "session scan cancelled",
+                        ));
+                    }
                     if descriptor.name_source == "custom" && !descriptor.name.is_empty() {
                         data.title = Some(descriptor.name.clone());
-                    }
-                    match self.claude.discover_subagents(&descriptor) {
-                        Ok(found) => subagents = found,
-                        Err(error) => tracing::warn!(action="subagent_scan_failed",%error),
                     }
                 }
                 if harness == Harness::Opencode {
                     last = 0;
-                    if !descriptor.title.is_empty() {
-                        data.title = Some(descriptor.title.clone());
-                    }
+                }
+                if matches!(harness, Harness::Opencode | Harness::Agy)
+                    && !descriptor.title.is_empty()
+                {
+                    data.title = Some(descriptor.title.clone());
                 }
                 let subagent_id = (descriptor.is_subagent
                     && ((harness == Harness::Codex && !descriptor.parent_thread_id.is_empty())
-                        || (harness == Harness::Opencode && !descriptor.parent_id.is_empty())))
+                        || (matches!(harness, Harness::Opencode | Harness::Agy)
+                            && !descriptor.parent_id.is_empty())))
                 .then(|| descriptor.session_id.clone());
-                Session {
+                let timestamp = start_timestamp(descriptor.started_at, last, now);
+                let last_activity = if harness == Harness::Opencode {
+                    descriptor.updated_at
+                } else {
+                    timestamp
+                };
+                let name = match harness {
+                    Harness::ClaudeCode => descriptor.name.clone(),
+                    Harness::Codex => descriptor.agent_nickname.clone(),
+                    _ => descriptor.title.clone(),
+                };
+                let snapshot = SessionSnapshot {
+                    harness,
+                    harness_version: descriptor.harness_version.clone(),
+                    session_id: descriptor.session_id.clone(),
+                    pid: descriptor.pid,
+                    cwd: descriptor.cwd.clone(),
+                    name,
+                    started_at: descriptor.started_at,
+                    last_activity: if last_activity == 0 {
+                        timestamp
+                    } else {
+                        last_activity
+                    },
+                    subagent: subagent_id.is_some(),
+                    transcript_path: descriptor.transcript_path.clone(),
+                    state: descriptor.state,
+                    state_updated_at: descriptor.state_updated_at,
+                    entrypoint: descriptor.entrypoint.clone(),
+                };
+                Ok(Session {
                     event: Event {
                         parsed: ParsedEvent {
-                            timestamp: start_timestamp(descriptor.started_at, last, now),
-                            cwd: descriptor.cwd.to_string_lossy().into(),
+                            timestamp,
+                            cwd: snapshot.cwd.to_string_lossy().into(),
                             data,
                             ..Default::default()
                         },
                         harness,
-                        harness_version: descriptor.harness_version,
-                        session_id: descriptor.session_id,
+                        harness_version: snapshot.harness_version.clone(),
+                        session_id: snapshot.session_id.clone(),
                         subagent_id,
                         pid: descriptor.pid,
                     },
-                    path: descriptor.transcript_path,
-                    started_at: descriptor.started_at,
                     active: descriptor.is_active,
-                    subagents,
-                }
+                    snapshot,
+                })
             })
-            .collect())
+            .collect()
     }
+}
+impl Runner {
     async fn reconcile(
         &mut self,
         cancel: &CancellationToken,
@@ -108,8 +183,21 @@ impl Runner {
     ) {
         let previous = self.active.remove(&harness).unwrap_or_default();
         let mut next = BTreeMap::new();
-        for session in sessions.into_iter().filter(|session| session.active) {
+        let mut filtered = HashSet::new();
+        for session in sessions {
+            if !session.active {
+                continue;
+            }
             let id = session.event.session_id.clone();
+            if self
+                .cfg
+                .session_filter
+                .as_ref()
+                .is_some_and(|filter| !filter(&session.snapshot))
+            {
+                filtered.insert(id);
+                continue;
+            }
             if !previous.contains_key(&id)
                 && let Err(error) = self
                     .lifecycle(cancel, session.event.clone(), "run_started")
@@ -124,15 +212,24 @@ impl Runner {
                 pid: session.event.pid,
                 cwd: session.event.parsed.cwd.clone().into(),
                 harness_version: session.event.harness_version.clone(),
-                started_at: session.started_at,
+                started_at: session.snapshot.started_at,
                 is_active: true,
             });
-            self.attach(cancel, &session);
+            self.attach(
+                cancel,
+                &session.snapshot.transcript_path,
+                session.event.clone(),
+            );
             self.attach_subagents(cancel, &session).await;
-            if harness == Harness::Opencode
-                && let Err(error) = self.poll(cancel, &session).await
-            {
-                tracing::warn!(action="database_poll_failed",%error);
+            if harness == Harness::Opencode {
+                let result = if self.initial_scan && self.cfg.start_at_end {
+                    self.baseline_opencode(cancel, &session).await
+                } else {
+                    self.poll(cancel, &session).await
+                };
+                if let Err(error) = result {
+                    tracing::warn!(action="database_poll_failed",%error);
+                }
             }
             next.insert(id, session);
         }
@@ -142,6 +239,7 @@ impl Runner {
             }
             // Drain both inactive descriptors and vanished sessions before exit.
             if harness == Harness::Opencode
+                && !filtered.contains(&id)
                 && let Err(error) = self.poll(cancel, &old).await
                 && error.kind() != io::ErrorKind::NotFound
             {

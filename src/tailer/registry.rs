@@ -20,6 +20,27 @@ struct State {
     files: BTreeMap<PathBuf, usize>,
     subscribers: BTreeMap<PathBuf, BTreeMap<u64, Weak<Signal>>>,
 }
+impl State {
+    fn dispatch(&self, event: Event) {
+        let notify = |subscribers: &BTreeMap<u64, Weak<Signal>>| {
+            for signal in subscribers.values().filter_map(Weak::upgrade) {
+                signal.changed.notify_one();
+            }
+        };
+        if event.need_rescan() {
+            self.subscribers.values().for_each(notify);
+        } else if matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
+        ) {
+            for path in event.paths {
+                if let Some(subscribers) = self.subscribers.get(&path) {
+                    notify(subscribers);
+                }
+            }
+        }
+    }
+}
 pub struct WatcherRegistry {
     watcher: Mutex<Option<RecommendedWatcher>>,
     state: Arc<Mutex<State>>,
@@ -48,6 +69,7 @@ impl Drop for Subscription {
 fn absolute(path: &Path) -> io::Result<PathBuf> {
     std::path::absolute(path).map(|p| p.components().collect())
 }
+
 impl WatcherRegistry {
     pub fn new() -> io::Result<Arc<Self>> {
         let state = Arc::new(Mutex::new(State::default()));
@@ -55,26 +77,8 @@ impl WatcherRegistry {
         let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             let Some(state) = weak.upgrade() else { return };
             match event {
-                Ok(event)
-                    if matches!(
-                        event.kind,
-                        EventKind::Create(_)
-                            | EventKind::Modify(_)
-                            | EventKind::Remove(_)
-                            | EventKind::Any
-                    ) =>
-                {
-                    let state = state.lock().unwrap();
-                    for path in event.paths {
-                        if let Some(subscribers) = state.subscribers.get(&path) {
-                            for signal in subscribers.values().filter_map(Weak::upgrade) {
-                                signal.changed.notify_one();
-                            }
-                        }
-                    }
-                }
+                Ok(event) => state.lock().unwrap().dispatch(event),
                 Err(error) => tracing::warn!(action="watcher_event_error",%error),
-                _ => {}
             }
         })
         .map_err(io::Error::other)?;
@@ -215,5 +219,36 @@ impl WatcherRegistry {
 impl Drop for WatcherRegistry {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::Flag;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn overflow_wakes_subscriptions_even_without_event_paths() {
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        let registry = WatcherRegistry::new().unwrap();
+        let mut first = registry.subscribe(root.path().join("one")).unwrap();
+        let mut second = registry.subscribe(root.path().join("two")).unwrap();
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .dispatch(Event::new(EventKind::Other).set_flag(Flag::Rescan));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), first.changed())
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), second.changed())
+                .await
+                .unwrap()
+        );
     }
 }

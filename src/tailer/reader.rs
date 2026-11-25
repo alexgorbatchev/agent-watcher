@@ -44,6 +44,8 @@ pub struct Tailer {
     position: Arc<Mutex<Position>>,
     read_lock: tokio::sync::Mutex<()>,
     stop: CancellationToken,
+    start_at_end: bool,
+    poll_interval: Duration,
 }
 impl Tailer {
     pub fn new(
@@ -60,7 +62,21 @@ impl Tailer {
             position: Arc::new(Mutex::new(Position::default())),
             read_lock: tokio::sync::Mutex::new(()),
             stop: CancellationToken::new(),
+            start_at_end: false,
+            poll_interval: Duration::from_secs(10),
         })
+    }
+    /// On the initial read, skip an existing file if it has no saved cursor.
+    pub fn with_start_at_end(mut self, enabled: bool) -> Self {
+        self.start_at_end = enabled;
+        self
+    }
+    /// Change the fallback interval for missed filesystem notifications.
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        if !interval.is_zero() {
+            self.poll_interval = interval;
+        }
+        self
     }
     pub fn stop(&self) {
         self.stop.cancel();
@@ -134,12 +150,18 @@ impl Tailer {
                 p.offset = 0;
                 p.committed = 0;
                 // Load persisted progress only once. Reset generations never resurrect old offsets.
-                if first
-                    && let Some(c) = self.store.get(&key)
-                    && !should_reset(&c, identity.inode, metadata.len(), &prefix)
-                {
-                    p.offset = c.offset;
-                    p.committed = c.offset;
+                if first {
+                    match self.store.get(&key) {
+                        Some(c) if !should_reset(&c, identity.inode, metadata.len(), &prefix) => {
+                            p.offset = c.offset;
+                            p.committed = c.offset;
+                        }
+                        None if self.start_at_end => {
+                            p.offset = metadata.len();
+                            p.committed = p.offset;
+                        }
+                        _ => {}
+                    }
                 }
             }
             p.initialized = true;
@@ -194,7 +216,8 @@ impl Tailer {
             return Ok(());
         }
         let mut subscription = self.registry.subscribe(&self.path)?;
-        let mut poll = tokio::time::interval(Duration::from_secs(10));
+        let mut poll = tokio::time::interval(self.poll_interval);
+        poll.tick().await;
         loop {
             if let Err(error) = self.read_available(&cancel, &mut handler).await {
                 tracing::warn!(action="transcript_read_error",path=%self.path.display(),%error);

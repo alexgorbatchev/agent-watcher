@@ -42,7 +42,7 @@ fn pi_and_codex_prioritize_recent_sessions_and_resumes() {
         "{\"type\":\"session\",\"id\":\"old\",\"cwd\":\"/repo\",\"timestamp\":1700000000000}\n",
     )
     .unwrap();
-    fs::write(project.join("new.jsonl"),"{\"type\":\"session\",\"id\":\"new\",\"cwd\":\"/repo\",\"timestamp\":1700000000000}\n{\"type\":\"message\",\"timestamp\":1700000600000}\n{\"type\":\"last-prompt\",\"timestamp\":1900000000000}\n").unwrap();
+    fs::write(project.join("new.jsonl"),"{\"type\":\"session\",\"id\":\"new\",\"cwd\":\"/repo\",\"timestamp\":1700000000000}\n{\"type\":\"message\",\"timestamp\":\"2023-11-14T22:23:20Z\"}\n{\"type\":\"last-prompt\",\"timestamp\":\"2030-03-17T17:46:40Z\"}\n").unwrap();
     let snap = ProcessSnapshot::from_processes([process(10, "pi", "/repo", 1_700_000_600_000)]);
     let mut scanner = PiScanner::new(dir.path().into());
     let token = CancellationToken::new();

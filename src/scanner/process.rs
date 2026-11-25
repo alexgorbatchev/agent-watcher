@@ -1,6 +1,10 @@
 use super::{check_cancel, paths::clean_path};
-use std::{collections::BTreeMap, io, path::PathBuf};
-use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+    path::PathBuf,
+};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,6 +30,8 @@ pub struct ProcessSnapshot {
     pi: Vec<ProcessInfo>,
     codex: Vec<ProcessInfo>,
     opencode: Vec<ProcessInfo>,
+    agy: Vec<ProcessInfo>,
+    parents: BTreeMap<i32, i32>,
 }
 pub trait SnapshotProvider: Send + Sync {
     fn snapshot(&self, token: &CancellationToken) -> io::Result<ProcessSnapshot>;
@@ -56,7 +62,7 @@ fn basename(name: &str) -> String {
 fn plausible(name: &str) -> bool {
     matches!(
         name,
-        "pi" | "codex" | "codex-tui" | "codex-cli" | "opencode" | "claude"
+        "pi" | "codex" | "codex-tui" | "codex-cli" | "opencode" | "claude" | "agy"
     ) || interpreter(name)
 }
 fn interpreter(name: &str) -> bool {
@@ -66,23 +72,54 @@ fn interpreter(name: &str) -> bool {
 }
 impl ProcessSnapshot {
     pub fn capture(token: &CancellationToken) -> io::Result<Self> {
+        Self::capture_live(token, None)
+    }
+    /// Capture metadata and classify only processes accepted by the PID predicate.
+    pub fn capture_filtered(
+        token: &CancellationToken,
+        mut include: impl FnMut(i32) -> bool,
+    ) -> io::Result<Self> {
+        Self::capture_live(token, Some(&mut include))
+    }
+    fn capture_live(
+        token: &CancellationToken,
+        mut include: Option<&mut dyn FnMut(i32) -> bool>,
+    ) -> io::Result<Self> {
         check_cancel(token)?;
+        let selected_pids = if let Some(include) = &mut include {
+            let mut selected = Vec::new();
+            for pid in live_pids()? {
+                check_cancel(token)?;
+                if include(pid) {
+                    selected.push(Pid::from_u32(pid as u32));
+                }
+            }
+            check_cancel(token)?;
+            Some(selected)
+        } else {
+            None
+        };
         let mut system = System::new();
         system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
+            selected_pids
+                .as_deref()
+                .map_or(ProcessesToUpdate::All, ProcessesToUpdate::Some),
             true,
             ProcessRefreshKind::nothing().without_tasks(),
         );
         check_cancel(token)?;
-        let selected: Vec<_> = system
-            .processes()
-            .iter()
-            .filter(|(_, p)| {
-                let name = basename(&p.name().to_string_lossy());
-                plausible(&name) && name != "claude"
-            })
-            .map(|(pid, _)| *pid)
-            .collect();
+        let mut selected = Vec::new();
+        let mut classification = BTreeMap::new();
+        for (pid, process) in system.processes() {
+            check_cancel(token)?;
+            let name = classification_name(*pid, process.name());
+            if plausible(&name) && name != "claude" {
+                selected.push(*pid);
+                if let Ok(pid) = i32::try_from(pid.as_u32()) {
+                    classification.insert(pid, name);
+                }
+            }
+        }
         if !selected.is_empty() {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&selected),
@@ -94,11 +131,18 @@ impl ProcessSnapshot {
             );
         }
         let mut processes = Vec::with_capacity(system.processes().len());
+        let mut parents = BTreeMap::new();
         for (pid, p) in system.processes() {
             check_cancel(token)?;
             let Ok(pid) = i32::try_from(pid.as_u32()) else {
                 continue;
             };
+            if let Some(parent) = p
+                .parent()
+                .and_then(|parent| i32::try_from(parent.as_u32()).ok())
+            {
+                parents.insert(pid, parent);
+            }
             processes.push(ProcessMeta {
                 pid,
                 name: p.name().to_string_lossy().into_owned(),
@@ -114,10 +158,27 @@ impl ProcessSnapshot {
                     .collect(),
             });
         }
-        Ok(Self::from_processes(processes))
+        Ok(Self::classify(processes, parents, &classification))
     }
     pub fn from_processes(processes: impl IntoIterator<Item = ProcessMeta>) -> Self {
-        let mut snapshot = Self::default();
+        Self::from_processes_with_parents(processes, [])
+    }
+    /// Construct a snapshot with optional (child PID, parent PID) relationships.
+    pub fn from_processes_with_parents(
+        processes: impl IntoIterator<Item = ProcessMeta>,
+        parents: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Self {
+        Self::classify(processes, parents.into_iter().collect(), &BTreeMap::new())
+    }
+    fn classify(
+        processes: impl IntoIterator<Item = ProcessMeta>,
+        parents: BTreeMap<i32, i32>,
+        classification: &BTreeMap<i32, String>,
+    ) -> Self {
+        let mut snapshot = Self {
+            parents,
+            ..Self::default()
+        };
         for mut p in processes {
             if !p.cwd.as_os_str().is_empty() {
                 p.cwd = clean_path(&p.cwd)
@@ -128,7 +189,10 @@ impl ProcessSnapshot {
             if p.pid <= 0 || !p.alive || p.cwd.as_os_str().is_empty() {
                 continue;
             }
-            let name = basename(&p.name);
+            let name = classification
+                .get(&p.pid)
+                .cloned()
+                .unwrap_or_else(|| basename(&p.name));
             if !plausible(&name) {
                 continue;
             }
@@ -152,7 +216,10 @@ impl ProcessSnapshot {
                 snapshot.codex.push(info.clone())
             }
             if names.iter().any(|n| n == "opencode") {
-                snapshot.opencode.push(info)
+                snapshot.opencode.push(info.clone())
+            }
+            if names.iter().any(|n| n == "agy") {
+                snapshot.agy.push(info)
             }
         }
         snapshot
@@ -190,6 +257,7 @@ impl ProcessSnapshot {
             crate::Harness::Pi => &mut self.pi,
             crate::Harness::Codex => &mut self.codex,
             crate::Harness::Opencode => &mut self.opencode,
+            crate::Harness::Agy => &mut self.agy,
             crate::Harness::ClaudeCode => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -222,9 +290,79 @@ impl ProcessSnapshot {
     pub fn codex_processes(&self) -> &[ProcessInfo] {
         &self.codex
     }
+    pub(super) fn top_level_codex_processes(&self) -> impl Iterator<Item = &ProcessInfo> {
+        let pids: HashSet<_> = self.codex.iter().map(|process| process.pid).collect();
+        self.codex.iter().filter(move |process| {
+            self.parents
+                .get(&process.pid)
+                .is_none_or(|parent| !pids.contains(parent))
+        })
+    }
     pub fn opencode_processes(&self) -> &[ProcessInfo] {
         &self.opencode
     }
+    pub fn agy_processes(&self) -> &[ProcessInfo] {
+        &self.agy
+    }
+}
+
+fn classification_name(pid: Pid, name: &std::ffi::OsStr) -> String {
+    let name = basename(&name.to_string_lossy());
+    #[cfg(target_os = "linux")]
+    if !plausible(&name)
+        && let Ok(executable) = std::fs::read_link(format!("/proc/{}/exe", pid.as_u32()))
+    {
+        return basename(&executable.to_string_lossy());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+    name
+}
+
+#[cfg(target_os = "linux")]
+fn live_pids() -> io::Result<Vec<i32>> {
+    Ok(std::fs::read_dir("/proc")?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn live_pids() -> io::Result<Vec<i32>> {
+    // Passing a null buffer asks libproc for the approximate number of PIDs.
+    let estimated = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut capacity = estimated.saturating_add(64).max(64) as usize;
+    loop {
+        let mut pids = vec![0; capacity];
+        let bytes =
+            i32::try_from(std::mem::size_of_val(pids.as_slice())).map_err(io::Error::other)?;
+        // pids contains bytes of writable, correctly aligned PID storage.
+        let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if (count as usize) < capacity {
+            pids.truncate(count as usize);
+            pids.retain(|pid| *pid > 0);
+            return Ok(pids);
+        }
+        capacity *= 2;
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn live_pids() -> io::Result<Vec<i32>> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    Ok(system
+        .processes()
+        .keys()
+        .filter_map(|pid| i32::try_from(pid.as_u32()).ok().filter(|pid| *pid > 0))
+        .collect())
 }
 
 pub(super) fn pair_process(

@@ -92,7 +92,11 @@ fn claude_project_fallback_and_unsafe_identifier_do_not_escape_roots() {
     )
     .unwrap();
     let mut scanner = ClaudeCodeScanner::new(vec![dir.path().into()]);
-    scanner.set_projects_dirs(vec![projects]);
+    scanner.set_projects_dir(&projects);
+    assert_eq!(
+        locate_claude_transcript("lookup", std::path::Path::new("/else"), Some(&projects)),
+        fs::canonicalize(projects.join("unrelated/lookup.jsonl")).unwrap()
+    );
     let sessions = scanner
         .scan(
             &CancellationToken::new(),
@@ -215,11 +219,22 @@ fn live_snapshot_observes_real_named_process_and_cancellation() {
     let executable = dir.path().join("pi");
     fs::write(
         &source,
-        "fn main(){std::thread::sleep(std::time::Duration::from_secs(30));}",
+        r#"
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: i32, ...) -> i32;
+}
+fn main() {
+    #[cfg(target_os = "linux")]
+    assert_eq!(unsafe { prctl(15, c"MainThread".as_ptr(), 0usize, 0usize, 0usize) }, 0);
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
+"#,
     )
     .unwrap();
     assert!(
         Command::new("rustc")
+            .arg("--edition=2024")
             .arg(&source)
             .arg("-o")
             .arg(&executable)
@@ -234,13 +249,18 @@ fn live_snapshot_observes_real_named_process_and_cancellation() {
         .unwrap();
     let token = CancellationToken::new();
     let result = (|| -> io::Result<()> {
+        let pid = child.id() as i32;
+        let excluded = ProcessSnapshot::capture_filtered(&token, |_| false)?;
+        assert_eq!(excluded.processes().len(), 0);
         for _ in 0..20 {
-            let snapshot = ProcessSnapshot::capture(&token)?;
-            if let Some(p) = snapshot
-                .pi_processes()
-                .iter()
-                .find(|p| p.pid == child.id() as i32)
-            {
+            let snapshot = ProcessSnapshot::capture_filtered(&token, |candidate| candidate == pid)?;
+            if let Some(p) = snapshot.pi_processes().iter().find(|p| p.pid == pid) {
+                #[cfg(target_os = "linux")]
+                if snapshot.process(pid).unwrap().name != "MainThread" {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                assert_eq!(snapshot.processes().len(), 1);
                 assert_eq!(p.cwd, fs::canonicalize(dir.path())?);
                 assert!(p.create_time > 0);
                 return Ok(());
@@ -252,6 +272,15 @@ fn live_snapshot_observes_real_named_process_and_cancellation() {
     let _ = child.kill();
     let _ = child.wait();
     result.unwrap();
+    assert_eq!(
+        ProcessSnapshot::capture_filtered(&token, |_| {
+            token.cancel();
+            true
+        })
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::Interrupted
+    );
     token.cancel();
     assert_eq!(
         ProcessSnapshot::capture(&token).unwrap_err().kind(),
@@ -279,6 +308,9 @@ fn default_paths_resolve_environment_in_isolated_processes() {
             .env("HOME", "/fixture/home")
             .env_remove("CLAUDE_SESSIONS_DIR")
             .env_remove("CLAUDE_PROJECTS_DIR")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("AGY_SESSIONS_DIR")
+            .env_remove("GEMINI_HOME")
             .env_remove("PI_SESSIONS_DIR")
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("CODEX_SESSIONS_DIR")
@@ -290,6 +322,8 @@ fn default_paths_resolve_environment_in_isolated_processes() {
             command
                 .env("CLAUDE_SESSIONS_DIR", "/custom/claude")
                 .env("CLAUDE_PROJECTS_DIR", "/custom/projects")
+                .env("CLAUDE_CONFIG_DIR", "/custom/claude-config")
+                .env("GEMINI_HOME", "/custom/gemini")
                 .env("PI_CODING_AGENT_DIR", "/custom/pi")
                 .env("CODEX_HOME", "/custom/codex")
                 .env("XDG_DATA_HOME", "/custom/data")
@@ -368,6 +402,21 @@ fn default_path_fixture() {
             std::path::PathBuf::from("/custom/projects")
         );
         assert_eq!(
+            default_claude_session_dirs()[2..],
+            [
+                std::path::PathBuf::from("/custom/claude-config/sessions"),
+                std::path::PathBuf::from("/fixture/home/.claude/sessions"),
+            ],
+        );
+        assert_eq!(
+            default_claude_projects_dirs()[2],
+            std::path::PathBuf::from("/custom/claude-config/projects")
+        );
+        assert_eq!(
+            default_agy_sessions_dir(),
+            std::path::PathBuf::from("/custom/gemini/antigravity-cli/brain")
+        );
+        assert_eq!(
             default_pi_sessions_dir(),
             std::path::PathBuf::from("/custom/pi/sessions")
         );
@@ -407,6 +456,10 @@ fn default_path_fixture() {
         assert_eq!(
             default_session_tracker_path(),
             std::path::PathBuf::from("/fixture/home/.cache/agent-watcher/observer-sessions.json")
+        );
+        assert_eq!(
+            default_agy_sessions_dir(),
+            std::path::PathBuf::from("/fixture/home/.gemini/antigravity-cli/brain")
         );
     }
     assert!(

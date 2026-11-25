@@ -1,9 +1,10 @@
 use super::{
-    ProcessSnapshot, SessionDescriptor, check_cancel,
+    ProcessSnapshot, SessionDescriptor, SessionState, check_cancel,
     paths::clean_path,
     process::pair_process,
-    timestamps::{extract_last_active_timestamp, header_timestamp, mtime, rfc_timestamp},
+    timestamps::{header_timestamp, last_native_activity, mtime, rfc_timestamp, scan_backward},
 };
+use agent_parser::{codex_activity_timestamp, pi_activity_timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -112,13 +113,13 @@ pub fn read_codex_session_header(path: &Path) -> io::Result<CodexHeader> {
     })
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FileStamp {
+pub(super) struct FileStamp {
     size: u64,
     modified: Option<SystemTime>,
     identity: (u64, u64),
 }
 impl FileStamp {
-    fn from(metadata: &Metadata) -> Self {
+    pub(super) fn from(metadata: &Metadata) -> Self {
         #[cfg(unix)]
         let identity = {
             use std::os::unix::fs::MetadataExt;
@@ -139,6 +140,7 @@ struct Cached {
     descriptor: SessionDescriptor,
     header_time: i64,
     file_time: i64,
+    turn: Option<(SessionState, i64)>,
 }
 #[derive(Debug, Default)]
 struct TranscriptScanner {
@@ -228,7 +230,12 @@ impl TranscriptScanner {
                 };
                 descriptor.cwd = clean_path(&descriptor.cwd);
                 let file_time = mtime(&metadata);
-                descriptor.last_active = extract_last_active_timestamp(&path, file_time)?;
+                let parse = if self.recursive {
+                    codex_activity_timestamp
+                } else {
+                    pi_activity_timestamp
+                };
+                descriptor.last_active = last_native_activity(token, &path, parse)?;
                 descriptor.started_at = if header_time > 0 {
                     header_time
                 } else {
@@ -242,6 +249,7 @@ impl TranscriptScanner {
                     descriptor,
                     header_time,
                     file_time,
+                    turn: None,
                 })
             })();
             if let Ok(cached) = parsed {
@@ -263,13 +271,15 @@ impl TranscriptScanner {
         for cached in candidates {
             check_cancel(token)?;
             let mut descriptor = cached.descriptor;
-            if let Some(process) = pair_process(
-                &descriptor.cwd,
-                cached.header_time,
-                descriptor.last_active.max(cached.file_time),
-                processes,
-                &mut used,
-            ) {
+            if descriptor.parent_thread_id.is_empty()
+                && let Some(process) = pair_process(
+                    &descriptor.cwd,
+                    cached.header_time,
+                    descriptor.last_active.max(cached.file_time),
+                    processes,
+                    &mut used,
+                )
+            {
                 descriptor.pid = process.pid;
                 descriptor.is_active = true;
                 if process.create_time > 0 {
@@ -322,6 +332,117 @@ impl CodexScanner {
         token: &CancellationToken,
         snapshot: &ProcessSnapshot,
     ) -> io::Result<Vec<SessionDescriptor>> {
-        self.0.scan(token, snapshot.codex_processes())
+        let processes: Vec<_> = snapshot.top_level_codex_processes().cloned().collect();
+        let mut sessions = self.0.scan(token, &processes)?;
+        activate_codex_subagents(&mut sessions);
+        let creation_times: HashMap<_, _> = processes
+            .iter()
+            .map(|process| (process.pid, process.create_time))
+            .collect();
+        for session in sessions.iter_mut().filter(|session| session.is_active) {
+            check_cancel(token)?;
+            let cached = self
+                .0
+                .cache
+                .get_mut(&session.transcript_path)
+                .expect("discovered rollout is cached");
+            let (state, timestamp) = if let Some(turn) = cached.turn {
+                turn
+            } else {
+                let turn = read_codex_turn(token, &session.transcript_path);
+                check_cancel(token)?;
+                cached.turn = turn.ok();
+                cached.turn.unwrap_or((SessionState::Unknown, 0))
+            };
+            session.state = if state == SessionState::Working
+                && timestamp
+                    < creation_times
+                        .get(&session.pid)
+                        .copied()
+                        .unwrap_or_default()
+            {
+                SessionState::Idle
+            } else {
+                state
+            };
+            session.state_updated_at = timestamp;
+        }
+        Ok(sessions)
     }
+}
+
+fn activate_codex_subagents(sessions: &mut [SessionDescriptor]) {
+    let by_id: HashMap<_, _> = sessions
+        .iter()
+        .map(|session| {
+            (
+                session.session_id.clone(),
+                (
+                    session.parent_thread_id.clone(),
+                    session.is_active.then_some(session.pid),
+                ),
+            )
+        })
+        .collect();
+    for session in sessions {
+        let mut visited = HashSet::from([session.session_id.as_str()]);
+        let mut parent = session.parent_thread_id.as_str();
+        while !parent.is_empty() && visited.insert(parent) {
+            let Some((ancestor, pid)) = by_id.get(parent) else {
+                break;
+            };
+            if let Some(pid) = pid {
+                session.pid = *pid;
+                session.is_active = true;
+                break;
+            }
+            parent = ancestor;
+        }
+    }
+}
+
+fn read_codex_turn(cancel: &CancellationToken, path: &Path) -> io::Result<(SessionState, i64)> {
+    const MAX_TURN_SCAN: u64 = 32 * 1024 * 1024;
+    const BOUNDARIES: [&str; 5] = [
+        "task_started",
+        "turn_started",
+        "task_complete",
+        "turn_complete",
+        "turn_aborted",
+    ];
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        timestamp: Option<String>,
+        payload: Payload,
+    }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    let turn = scan_backward(cancel, path, MAX_TURN_SCAN, |line| {
+        let line = std::str::from_utf8(line).ok()?;
+        if !BOUNDARIES.iter().any(|kind| line.contains(kind)) {
+            return None;
+        }
+        let event: Record = serde_json::from_str(line).ok()?;
+        if event.kind != "event_msg" {
+            return None;
+        }
+        let state = match event.payload.kind.as_str() {
+            "task_started" | "turn_started" => SessionState::Working,
+            "task_complete" | "turn_complete" | "turn_aborted" => SessionState::Idle,
+            _ => return None,
+        };
+        let timestamp = event
+            .timestamp
+            .as_deref()
+            .and_then(rfc_timestamp)
+            .unwrap_or_default();
+        Some((state, timestamp))
+    })?;
+    Ok(turn.unwrap_or((SessionState::Unknown, 0)))
 }

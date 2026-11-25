@@ -5,7 +5,7 @@ use crate::{
     tailer::Line,
     watcher::{Event, Handler, Harness},
 };
-use agent_parser::{ClaudeCodeParser, CodexParser};
+use agent_parser::{AgyParser, ClaudeCodeParser, CodexParser};
 use std::{io, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +23,7 @@ pub struct TranscriptReader {
     generation: Option<u64>,
     claude: ClaudeCodeParser,
     codex: CodexParser,
+    agy: AgyParser,
 }
 impl TranscriptReader {
     pub fn new(session: Event) -> Self {
@@ -33,6 +34,7 @@ impl TranscriptReader {
             generation: None,
             claude: ClaudeCodeParser::new(),
             codex: CodexParser::new(),
+            agy: AgyParser::new(),
         }
     }
     pub async fn process(
@@ -61,12 +63,14 @@ impl TranscriptReader {
             if self.generation != Some(line.generation) {
                 self.claude.reset();
                 self.codex.reset();
+                self.agy.reset();
                 self.generation = Some(line.generation);
             }
             let acknowledgement = self.queue.add(line.generation, line.acknowledgement)?;
             let parsed = match self.session.harness {
                 Harness::ClaudeCode => self.claude.parse_line(&line.bytes),
                 Harness::Codex => self.codex.parse_line(&line.bytes),
+                Harness::Agy => self.agy.parse_line(&line.bytes),
                 Harness::Pi => agent_parser::parse_pi_line(&line.bytes, &self.session.parsed.cwd),
                 Harness::Opencode => {
                     return Err(io::Error::new(

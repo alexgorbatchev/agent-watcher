@@ -1,8 +1,9 @@
-`agent-watcher` discovers Claude Code, Pi, Codex, and OpenCode sessions and delivers lifecycle and parsed activity events to Rust applications. Consumers choose their storage, display, and delivery policy, then acknowledge events after delivery succeeds.
+`agent-watcher` discovers Claude Code, Pi, Codex, OpenCode, and Antigravity sessions and delivers lifecycle and parsed activity events to Rust applications. Consumers choose their storage, display, and delivery policy, then acknowledge events after delivery succeeds.
 
 # What It Does
 
 - **Session discovery**: Match session files and database records to running harness processes, including child sessions and Claude Code subagent transcripts.
+- **On-demand snapshots**: List live sessions and their reported state without opening observer state files.
 - **Incremental activity**: Follow JSONL appends and replacements, and read OpenCode message and part revisions without modifying harness storage.
 - **Durable acknowledgements**: Persist transcript byte offsets and database revisions so unacknowledged activity replays after restart.
 - **Owned shutdown**: Stop and join transcript workers when the caller cancels observation.
@@ -73,17 +74,20 @@ async fn main() -> io::Result<()> {
 
 # Configuration
 
-Explicit paths override environment defaults. Empty harness selection means all four harnesses; zero durations select their defaults.
+An empty harness selection includes all five harnesses. Zero durations select their defaults.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `harnesses` | `Vec<Harness>` | All four | Select `ClaudeCode`, `Pi`, `Codex`, or `Opencode`. |
+| `harnesses` | `Vec<Harness>` | All five | Select `ClaudeCode`, `Pi`, `Codex`, `Opencode`, or `Agy`. |
 | `scan_interval` | `Duration` | `2s` | Discovery and database polling period. |
-| `claude_sessions_dirs` | `Vec<PathBuf>` | Harness paths | `$CLAUDE_SESSIONS_DIR`, ai-registry sessions under the data directory, and `~/.claude/sessions`. |
-| `claude_projects_dir` | `PathBuf` | Harness paths | `$CLAUDE_PROJECTS_DIR`, ai-registry projects under the data directory, and `~/.claude/projects`. |
+| `claude_sessions_dirs` | `Vec<PathBuf>` | Harness paths | `$CLAUDE_SESSIONS_DIR`, ai-registry sessions under the data directory, `$CLAUDE_CONFIG_DIR/sessions`, and `~/.claude/sessions`. |
+| `claude_projects_dir` | `PathBuf` | Harness paths | Uses the explicit directory or `$CLAUDE_PROJECTS_DIR` first, then ai-registry projects under the data directory, `$CLAUDE_CONFIG_DIR/projects`, and `~/.claude/projects`. |
 | `pi_sessions_dir` | `PathBuf` | Harness path | `$PI_SESSIONS_DIR`, `$PI_CODING_AGENT_DIR/sessions`, or `~/.pi/agent/sessions`. |
 | `codex_sessions_dir` | `PathBuf` | Harness path | `$CODEX_SESSIONS_DIR`, `$CODEX_HOME/sessions`, or `~/.codex/sessions`. |
 | `opencode_db_path` | `PathBuf` | Harness path | `$OPENCODE_DB_PATH`, or `opencode/opencode.db` beneath the data directory. |
+| `agy_sessions_dir` | `PathBuf` | Harness path | `$AGY_SESSIONS_DIR`, `$GEMINI_HOME/antigravity-cli/brain`, or `~/.gemini/antigravity-cli/brain`. |
+| `start_at_end` | `bool` | `false` | Skip existing activity on the first discovery scan. Saved transcript offsets take precedence. |
+| `session_filter` | `Option<SessionFilter>` | `None` | Gate observation of live sessions using their snapshot fields. |
 | `cursor_path` | `PathBuf` | Observer cache | `observer-cursors.json` beneath `$XDG_CACHE_HOME/agent-watcher` or `~/.cache/agent-watcher`. |
 | `opencode_checkpoint_path` | `PathBuf` | Cursor path + `.opencode` | Acknowledged database revisions. |
 | `session_state_path` | `PathBuf` | Observer cache | `observer-sessions.json` for exit detection across restarts. |
@@ -92,7 +96,7 @@ Explicit paths override environment defaults. Empty harness selection means all 
 | `cursor_flush_interval` | `Duration` | `2s` | Flush byte cursors and database revisions. |
 | `process_snapshot_provider` | `Arc<dyn SnapshotProvider>` | Live processes | Supply one immutable process snapshot per discovery tick. |
 
-Custom providers can iterate captured `ProcessSnapshot::processes()` and construct a filtered snapshot with `from_processes`. `declare_candidate(harness, ProcessInfo)` associates Pi, Codex, or OpenCode with an explicitly selected alias/interpreter process. It requires a captured live PID, its exact captured start time, and a working directory; repeated declarations replace that PID's candidate without altering actual process metadata. Claude Code uses PID descriptors instead. Cancellation and process-session filtering remain the provider's responsibility.
+Custom providers can use `ProcessSnapshot::capture_filtered` to capture selected live PIDs or construct a snapshot from supplied process metadata. `declare_candidate(harness, ProcessInfo)` associates Pi, Codex, OpenCode, or Antigravity with an explicitly selected process. It requires a captured live PID, its exact captured start time, and a working directory. Repeated declarations replace that PID's candidate. Claude Code uses its session file's PID.
 
 The data directory is `$XDG_DATA_HOME` or `~/.local/share`. The ai-registry paths are `ai-registry/claude-code/sessions` and `ai-registry/claude-code/projects` beneath it. Logging uses the application's tracing subscriber.
 
@@ -101,6 +105,8 @@ The data directory is `$XDG_DATA_HOME` or `~/.local/share`. The ai-registry path
 | Export | Purpose |
 | :--- | :--- |
 | `run(&CancellationToken, Config, Handler)` | Observe sessions asynchronously and return `io::Result<()>`. |
+| `snapshot(&CancellationToken, Config)` | List live sessions, sorted by harness and session ID, alongside any discovery errors. |
+| `Snapshotter::new(Config)` | Reuse discovery caches across live snapshots. |
 | `Event` | Flatten `agent-parser` activity fields into serialized events with harness and session identity. |
 | `Acknowledgement::acknowledge()` | Confirm delivery; cloned callbacks share checkpoint state. |
 | `scanner` | Access native process snapshots, harness discovery, timestamp extraction, and persisted session tracking. |

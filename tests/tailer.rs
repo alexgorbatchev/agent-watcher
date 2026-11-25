@@ -9,6 +9,67 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[tokio::test]
+async fn initial_end_offset_preserves_saved_cursor_and_reads_replacement_from_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("session.jsonl");
+    let store = Arc::new(CursorStore::open(dir.path().join("cursor.json")).unwrap());
+    let registry = WatcherRegistry::new().unwrap();
+    let cancel = CancellationToken::new();
+    let mut seen = Vec::new();
+    let original = b"history\nlive\n";
+    fs::write(&transcript, b"history\n").unwrap();
+    let make_tailer = || {
+        Tailer::new(
+            &transcript,
+            store.clone(),
+            registry.clone(),
+            DeliveryMode::Automatic,
+        )
+        .unwrap()
+        .with_start_at_end(true)
+        .with_poll_interval(Duration::from_millis(20))
+    };
+    let tailer = make_tailer();
+    tailer
+        .read_available(&cancel, |_| {
+            std::future::ready(Err(io::Error::other("history emitted")))
+        })
+        .await
+        .unwrap();
+    assert_eq!(tailer.committed_offset(), 8);
+    fs::write(&transcript, original).unwrap();
+    tailer
+        .read_available(&cancel, |line| {
+            seen.push(line.bytes);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen, [b"live"]);
+    let restarted = make_tailer();
+    fs::write(&transcript, [original.as_slice(), b"unread\n"].concat()).unwrap();
+    restarted
+        .read_available(&cancel, |line| {
+            seen.push(line.bytes);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen[1], b"unread");
+    let replaced = dir.path().join("old.jsonl");
+    fs::rename(&transcript, replaced).unwrap();
+    fs::write(&transcript, b"new generation\n").unwrap();
+    restarted
+        .read_available(&cancel, |line| {
+            seen.push(line.bytes);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen[2], b"new generation");
+}
+
 #[test]
 fn native_watch_registration_during_events_does_not_deadlock() {
     use std::{

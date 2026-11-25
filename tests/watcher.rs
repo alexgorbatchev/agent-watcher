@@ -31,6 +31,7 @@ fn config(root: &Path, harness: Harness, active: Arc<AtomicBool>) -> Config {
         pi_sessions_dir: root.join("pi"),
         codex_sessions_dir: root.join("codex"),
         opencode_db_path: root.join("opencode.db"),
+        agy_sessions_dir: root.join("agy/brain"),
         cursor_path: root.join("cursors.json"),
         session_state_path: root.join("sessions.json"),
         process_snapshot_provider: Arc::new(move |_: &CancellationToken| {
@@ -52,6 +53,9 @@ fn fixture(cfg: &Config, harness: Harness) -> PathBuf {
         Harness::ClaudeCode => cwd.join("transcript.jsonl"),
         Harness::Pi => cfg.pi_sessions_dir.join("project/session.jsonl"),
         Harness::Codex => cfg.codex_sessions_dir.join("2026/session.jsonl"),
+        Harness::Agy => cfg
+            .agy_sessions_dir
+            .join("session/.system_generated/logs/transcript_full.jsonl"),
         Harness::Opencode => unreachable!(),
     };
     let records = match harness {
@@ -70,6 +74,17 @@ fn fixture(cfg: &Config, harness: Harness) -> PathBuf {
             json!({"type":"session_meta","timestamp":stamp,"payload":{"id":"session","cwd":cwd,"cli_version":"1.2","timestamp":stamp}}),
             json!({"type":"event_msg","timestamp":stamp,"payload":{"type":"task_complete","last_agent_message":"done"}}),
         ],
+        Harness::Agy => {
+            let agy_data = cfg.agy_sessions_dir.parent().unwrap();
+            write(
+                &agy_data.join("conversations/session.meta"),
+                &json!({"cwd":cwd}).to_string(),
+            );
+            vec![
+                json!({"type":"USER_INPUT","created_at":stamp,"content":"hello"}),
+                json!({"type":"PLANNER_RESPONSE","created_at":stamp,"content":"done"}),
+            ]
+        }
         Harness::Opencode => unreachable!(),
     };
     write(
@@ -121,7 +136,12 @@ async fn event(receiver: &mut mpsc::UnboundedReceiver<Event>, kind: &str) -> Eve
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_transcript_harness_streams_lifecycle_and_persists_cursors() {
-    for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Codex] {
+    for harness in [
+        Harness::ClaudeCode,
+        Harness::Pi,
+        Harness::Codex,
+        Harness::Agy,
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let active = Arc::new(AtomicBool::new(true));
         let cfg = config(temp.path(), harness, active.clone());
@@ -304,6 +324,68 @@ async fn database_revisions_and_final_completion_drain_precede_exit() {
     );
     event(&mut receiver, "run_exited").await;
     assert!(rejects.load(Ordering::SeqCst) >= 2);
+    stop(token, worker).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_baseline_checkpoints_existing_database_rows_and_filters_live_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = config(
+        temp.path(),
+        Harness::Opencode,
+        Arc::new(AtomicBool::new(true)),
+    );
+    cfg.start_at_end = true;
+    cfg.opencode_checkpoint_path = temp.path().join("revisions.json");
+    let permit = Arc::new(AtomicBool::new(true));
+    cfg.session_filter = Some(Arc::new({
+        let permit = permit.clone();
+        move |session| session.name == "Task" && session.pid == 42 && permit.load(Ordering::SeqCst)
+    }));
+    let db = database(&cfg);
+    db.execute_batch("INSERT INTO message VALUES('assistant','session',3,'{\"role\":\"assistant\"}');INSERT INTO part VALUES('thought','assistant','session',3,'{\"type\":\"reasoning\",\"text\":\"historical\"}');").unwrap();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (token, worker) = start(cfg.clone(), collect(sender, true));
+    event(&mut receiver, "run_started").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if std::fs::read_to_string(&cfg.opencode_checkpoint_path)
+                .is_ok_and(|text| text.contains("session:part:thought:thinking"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first poll should checkpoint history");
+    assert!(receiver.try_recv().is_err());
+    db.execute_batch("UPDATE part SET data='{\"type\":\"reasoning\",\"text\":\"live\"}'")
+        .unwrap();
+    assert_eq!(
+        event(&mut receiver, "thinking")
+            .await
+            .parsed
+            .data
+            .content
+            .as_deref(),
+        Some("live")
+    );
+    permit.store(false, Ordering::SeqCst);
+    event(&mut receiver, "run_exited").await;
+    db.execute_batch("UPDATE part SET data='{\"type\":\"reasoning\",\"text\":\"filtered\"}'")
+        .unwrap();
+    permit.store(true, Ordering::SeqCst);
+    event(&mut receiver, "run_started").await;
+    assert_eq!(
+        event(&mut receiver, "thinking")
+            .await
+            .parsed
+            .data
+            .content
+            .as_deref(),
+        Some("filtered")
+    );
     stop(token, worker).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

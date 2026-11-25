@@ -20,7 +20,7 @@ fn explicit_candidates_preserve_metadata_and_replace_duplicate_associations() {
     let mut snapshot = ProcessSnapshot::from_processes([original.clone()]);
     assert_eq!(snapshot.processes().collect::<Vec<_>>(), vec![&original]);
     assert!(snapshot.pi_processes().is_empty());
-    for harness in [Harness::Pi, Harness::Codex, Harness::Opencode] {
+    for harness in [Harness::Pi, Harness::Codex, Harness::Opencode, Harness::Agy] {
         snapshot
             .declare_candidate(
                 harness,
@@ -45,6 +45,7 @@ fn explicit_candidates_preserve_metadata_and_replace_duplicate_associations() {
     assert_eq!(snapshot.pi_processes().len(), 1);
     assert_eq!(snapshot.codex_processes(), snapshot.pi_processes());
     assert_eq!(snapshot.opencode_processes(), snapshot.pi_processes());
+    assert_eq!(snapshot.agy_processes(), snapshot.pi_processes());
     assert_eq!(
         snapshot.pi_processes()[0].cwd,
         std::path::Path::new("/repo")
